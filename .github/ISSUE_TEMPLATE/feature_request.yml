@@ -1,0 +1,32 @@
+name: Feature request
+description: Suggest an improvement or a new capability.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compareel is an unfunded volunteer project maintained in spare time. Please search existing issues before opening a new request.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: Describe the task or difficulty you want to solve.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed
+    attributes:
+      label: Proposed behaviour
+      description: Describe what Compareel should do and how it should fit into the interface.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other ways you handle this today, inside or outside Compareel.
+    validations:
+      required: false

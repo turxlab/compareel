@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>io.github.turxlab.Compareel</id>
+  <name>Compareel</name>
+  <summary>Compare duplicate videos and images</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-only</project_license>
+  <developer id="io.github.turxlab">
+    <name>Ensar Yanar</name>
+  </developer>
+  <description>
+    <p>
+      Compareel finds duplicate and similar videos and images in your folders and lets you review every
+      match side by side before anything is removed. Everything runs locally.
+    </p>
+    <ul>
+      <li>Exact copies verified by content, and similar videos and images found by their pictures</li>
+      <li>Synchronized side-by-side playback with wipe, overlay and difference views</li>
+      <li>Protected folders, review decisions and a cleanup plan you check before files move to the Trash</li>
+      <li>Undo for copies and moves, and an operation history</li>
+    </ul>
+  </description>
+  <launchable type="desktop-id">io.github.turxlab.Compareel.desktop</launchable>
+  <url type="homepage">https://turxlab.github.io/compareel/</url>
+  <url type="bugtracker">https://github.com/turxlab/compareel/issues</url>
+  <url type="help">https://turxlab.github.io/compareel/</url>
+  <url type="vcs-browser">https://github.com/turxlab/compareel</url>
+  <branding>
+    <color type="primary" scheme_preference="light">#dceafb</color>
+    <color type="primary" scheme_preference="dark">#1d2d44</color>
+  </branding>
+  <screenshots>
+    <screenshot type="default">
+      <caption>Side-by-side video comparison</caption>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.0.0/docs-site/assets/screenshot-compare.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Similar image groups and keep rules</caption>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.0.0/docs-site/assets/screenshot-results.png</image>
+    </screenshot>
+    <screenshot>
+      <caption>Start screen and scan modes</caption>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.0.0/docs-site/assets/screenshot-welcome.png</image>
+    </screenshot>
+  </screenshots>
+  <content_rating type="oars-1.1"/>
+  <releases>
+    <release version="1.0.0" date="2026-11-04"/>
+  </releases>
+</component>

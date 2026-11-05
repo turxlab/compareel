@@ -1,0 +1,190 @@
+# Builds every download of a release on GitHub's machines from this repository's source:
+# the Windows installer and portable zip, the universal macOS disk image, the Linux Flatpak and the source zip.
+# A version tag (v1.0.0) also creates a draft release with these files and their SHA-256 checksums.
+# "Run workflow" builds the same files for a test version and keeps them as downloadable artifacts only.
+name: Build
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version for a test build (for example 1.0.0-rc1)'
+        required: true
+        default: '1.0.0-rc1'
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+env:
+  VERSION: ${{ github.event_name == 'push' && github.ref_name || inputs.version }}
+
+jobs:
+  ffmpeg-windows:
+    # The Windows FFmpeg is cross-compiled in the pinned BtbN toolchain image, as tools/Build-FFmpegMinimal.ps1 does.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - id: cache
+        uses: actions/cache@v4
+        with:
+          path: .deps/ffmpeg-8.1-min
+          key: ffmpeg-win-${{ hashFiles('tools/ffmpeg-minimal/build.sh', 'tools/Build-FFmpegMinimal.ps1', 'third_party/ffmpeg/*.tar.gz') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          image=$(grep -o "ghcr.io/btbn/ffmpeg-builds/win64-lgpl-8.1@sha256:[0-9a-f]*" tools/Build-FFmpegMinimal.ps1)
+          mkdir -p .deps/ffmpeg-min-build
+          docker run --rm -v "$PWD/.deps/ffmpeg-min-build:/ffbuild" -v "$PWD/third_party/ffmpeg:/source:ro" \
+            -v "$PWD/tools/ffmpeg-minimal/build.sh:/build.sh:ro" "$image" bash /build.sh
+          sudo cp -r .deps/ffmpeg-min-build/out .deps/ffmpeg-8.1-min && sudo chown -R "$USER" .deps/ffmpeg-8.1-min
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ffmpeg-windows
+          path: .deps/ffmpeg-8.1-min
+          retention-days: 1
+
+  windows:
+    needs: ffmpeg-windows
+    runs-on: windows-2022
+    steps:
+      # Tags are v1.0.0; file names and the program use 1.0.0.
+      - name: Version
+        shell: bash
+        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ffmpeg-windows
+          path: .deps/ffmpeg-8.1-min
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Qt 6.8.3
+        shell: pwsh
+        run: |
+          python -m pip install --quiet aqtinstall
+          python -m aqt install-qt windows desktop 6.8.3 win64_msvc2022_64 -m qtimageformats -O .deps/Qt
+      - name: libheif
+        shell: pwsh
+        run: ./tools/Setup-Heif.ps1
+      - name: Inno Setup
+        run: choco install innosetup --no-progress -y
+      - name: Package
+        shell: pwsh
+        run: ./build.ps1 -Package -Version $env:VERSION -BuildDirectory .build-ci
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            release/v${{ env.VERSION }}/Compareel-${{ env.VERSION }}-x86_64-Win.exe
+            release/v${{ env.VERSION }}/Compareel-${{ env.VERSION }}-x86_64-Win.zip
+            release/v${{ env.VERSION }}/Compareel-${{ env.VERSION }}-source.zip
+
+  macos:
+    # Xcode 16 or later: its libc++ has std::jthread, which Compareel uses.
+    runs-on: macos-15
+    steps:
+      # Tags are v1.0.0; file names and the program use 1.0.0.
+      - name: Version
+        shell: bash
+        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - name: Build tools
+        run: brew install meson nasm autoconf automake libtool pkg-config ninja
+      # The libraries take most of the job's time, so they are saved as soon as they are built, even if a later step fails.
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            .deps/mac-universal
+            .deps/Qt
+          key: mac-deps-${{ hashFiles('tools/Setup-MacDeps.sh', 'third_party/ffmpeg/*.tar.gz', 'third_party/libheif-1.23.7/*.tar.gz') }}
+      - if: steps.cache.outputs.cache-hit != 'true'
+        run: tools/Setup-MacDeps.sh universal
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            .deps/mac-universal
+            .deps/Qt
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - name: Package
+        run: ./build-macos.sh --package "$VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: release/v${{ env.VERSION }}/Compareel-${{ env.VERSION }}.dmg
+
+  linux:
+    # The same script that builds the Flatpak locally (tools/Build-Flatpak.ps1), run on the machine itself:
+    # GitHub's container for Flatpak builds runs out of disk space with the KDE SDK.
+    runs-on: ubuntu-24.04
+    steps:
+      # Tags are v1.0.0; file names and the program use 1.0.0.
+      - name: Version
+        shell: bash
+        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+      - name: Disk space
+        # Preinstalled toolchains Compareel never uses take tens of gigabytes.
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/share/swift
+          df -h /
+      - name: Flatpak tools
+        run: |
+          sudo apt-get update -qq && sudo apt-get install -y -qq flatpak flatpak-builder ccache
+          # Ubuntu 24.04 confines unprivileged user namespaces, which flatpak-builder's sandbox needs.
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # flatpak-builder's state keeps each finished module (dav1d, zimg, libjxl, FFmpeg, libheif); with it only
+      # Compareel itself is rebuilt until the manifest changes. Saved right after the build, as for macOS.
+      - id: cache
+        uses: actions/cache/restore@v4
+        with:
+          path: ${{ runner.temp }}/flatpak/state
+          key: flatpak-state-${{ hashFiles('packaging/linux/io.github.turxlab.Compareel.yml', 'third_party/ffmpeg/*.tar.gz', 'third_party/libheif-1.23.7/*.tar.gz') }}
+      - name: Package
+        run: FLATPAK_WORK="$RUNNER_TEMP/flatpak" bash tools/build-flatpak.sh "$VERSION"
+      - if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: ${{ runner.temp }}/flatpak/state
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: release/v${{ env.VERSION }}/Compareel-${{ env.VERSION }}-x86_64.flatpak
+
+  release:
+    needs: [windows, macos, linux]
+    runs-on: ubuntu-24.04
+    steps:
+      # Tags are v1.0.0; file names and the program use 1.0.0.
+      - name: Version
+        shell: bash
+        run: echo "VERSION=${VERSION#v}" >> "$GITHUB_ENV"
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: '{windows,macos,linux}'
+          merge-multiple: true
+      - name: Checksums
+        working-directory: dist
+        run: sha256sum Compareel-* | tee SHA256SUMS.txt
+      # GitHub's signed statement that these files were built here from this commit; public repositories only.
+      - if: github.event.repository.private == false
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: dist/Compareel-*
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Compareel-${{ env.VERSION }}
+          path: dist
+      - if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" dist/* --repo "$GITHUB_REPOSITORY" --draft \
+            --title "Compareel ${GITHUB_REF_NAME#v}" --notes-file /dev/null

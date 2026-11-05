@@ -1,0 +1,100 @@
+name: Bug report
+description: Report a reproducible problem in the latest release of Compareel.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Compareel is an unfunded volunteer project maintained by one person. Only the latest release is supported; please check [Releases](https://github.com/turxlab/compareel/releases) and [Supported formats and limits](https://github.com/turxlab/compareel/blob/main/packaging/SUPPORTED_FORMATS.md) before opening an issue.
+
+        Remove private file names and folder paths from everything you paste or attach. Do not report security vulnerabilities here; use **Security > Report a vulnerability** instead.
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - Windows 10
+        - Windows 11
+        - macOS Apple Silicon
+        - macOS Intel
+        - Linux Flatpak
+        - Linux built from source
+    validations:
+      required: true
+
+  - type: dropdown
+    id: package
+    attributes:
+      label: Package type
+      options:
+        - Windows installer (.exe)
+        - Windows portable (.zip)
+        - macOS disk image (.dmg)
+        - Linux Flatpak (.flatpak)
+        - Built from source
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: Compareel version
+      description: "Shown in Help > About Compareel, or Compareel > About Compareel in the macOS app menu."
+      placeholder: "1.0.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: scan_mode
+    attributes:
+      label: Scan mode
+      options:
+        - Videos - Exact copies
+        - Videos - Similar videos
+        - Videos - Advanced criteria
+        - Images - Exact copies
+        - Images - Similar images
+        - Images - Advanced criteria
+        - File > Open two files…
+        - Tools > Find partial clips in folders…
+        - Not related to scanning
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: "Numbered steps from opening Compareel to seeing the problem. Mention the container and codec or image format if relevant. Remove private file names and folder paths."
+      placeholder: |
+        1.
+        2.
+        3.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behaviour
+      description: What should have happened.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behaviour
+      description: What happened instead, including the exact message shown on screen if any.
+    validations:
+      required: true
+
+  - type: textarea
+    id: scan_report
+    attributes:
+      label: Scan report and error codes
+      description: "Optional. Open Tools > Scan report and copy the summary lines and any 0x... error codes. Remove private file names and folder paths before submitting. For slow operations, starting Compareel with COMPAREEL_TRACE=1 writes extra diagnostic timing output (on Windows, also set QT_FORCE_STDERR_LOGGING=1)."
+      render: text
+    validations:
+      required: false

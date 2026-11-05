@@ -1,0 +1,23 @@
+# Local SDKs and build output (recreated by tools/Setup-*.ps1 and build.ps1)
+.deps/
+.build/
+.build-*/
+*.obj
+*.pdb
+aqtinstall.log
+
+# Release packages are build artifacts
+release/
+
+# Development and hand-off notes stay local
+docs/
+
+# Session files and check screenshots written to the working directory
+*.cvsession
+/.720.png
+/.privacy.png
+/.plan.png
+
+# Local development builds and Finder metadata
+/build-mac/
+.DS_Store

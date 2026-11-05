@@ -1,0 +1,92 @@
+# Flatpak manifest. The libraries are built the same way as for Windows and macOS: a decode-only FFmpeg
+# from third_party/ffmpeg with dav1d, zimg and libjxl, and libheif from third_party/libheif-1.23.7 decoding
+# HEVC and AV1 through that FFmpeg. Qt 6.8 comes from the KDE runtime. Built by tools/build-flatpak.sh.
+# Libraries go to /app/lib: the SDK's CMake default is lib64, which pkg-config does not search here, so the runtime's
+# older libheif would be linked instead. Each library's license text is installed next to Compareel's.
+id: io.github.turxlab.Compareel
+runtime: org.kde.Platform
+runtime-version: '6.8'
+sdk: org.kde.Sdk
+command: Compareel
+finish-args:
+  - --share=ipc
+  - --socket=wayland
+  - --socket=fallback-x11
+  - --device=dri
+  - --socket=pulseaudio
+  # Duplicates live anywhere the user keeps media, and removing one moves it to the host's Trash.
+  - --filesystem=host
+  - --talk-name=org.freedesktop.FileManager1
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /lib/cmake
+  - /share/doc
+  - '*.a'
+modules:
+  - name: dav1d
+    buildsystem: meson
+    config-opts: [--buildtype=release, -Denable_tools=false, -Denable_tests=false, -Denable_examples=false]
+    # Meson builds outside the source folder; flatpak-builder records dav1d's COPYING itself.
+    sources:
+      - type: git
+        url: https://code.videolan.org/videolan/dav1d.git
+        tag: 1.5.4
+
+  - name: zimg
+    buildsystem: autotools
+    config-opts: [--disable-static]
+    post-install: [install -Dm644 COPYING /app/share/licenses/io.github.turxlab.Compareel/zimg-COPYING]
+    sources:
+      - type: git
+        url: https://github.com/sekrit-twc/zimg.git
+        tag: release-3.0.6
+
+  - name: libjxl
+    buildsystem: cmake-ninja
+    config-opts: [-DCMAKE_BUILD_TYPE=Release, -DCMAKE_INSTALL_LIBDIR=lib, -DBUILD_TESTING=OFF, -DJPEGXL_ENABLE_TOOLS=OFF, -DJPEGXL_ENABLE_JPEGLI=OFF,
+      -DJPEGXL_ENABLE_DOXYGEN=OFF, -DJPEGXL_ENABLE_MANPAGES=OFF, -DJPEGXL_ENABLE_BENCHMARK=OFF, -DJPEGXL_ENABLE_EXAMPLES=OFF,
+      -DJPEGXL_ENABLE_SJPEG=OFF, -DJPEGXL_ENABLE_OPENEXR=OFF, -DJPEGXL_ENABLE_JNI=OFF, -DJPEGXL_ENABLE_SKCMS=ON,
+      -DJPEGXL_BUNDLE_LIBPNG=OFF, -DJPEGXL_ENABLE_TRANSCODE_JPEG=OFF]
+    post-install:
+      - install -Dm644 LICENSE /app/share/licenses/io.github.turxlab.Compareel/libjxl-LICENSE
+      - install -Dm644 third_party/highway/LICENSE-BSD3 /app/share/licenses/io.github.turxlab.Compareel/Highway-LICENSE-BSD3
+      - install -Dm644 third_party/brotli/LICENSE /app/share/licenses/io.github.turxlab.Compareel/Brotli-LICENSE
+      - install -Dm644 third_party/skcms/LICENSE /app/share/licenses/io.github.turxlab.Compareel/skcms-LICENSE
+    sources:
+      - type: git
+        url: https://github.com/libjxl/libjxl.git
+        tag: v0.12.0
+
+  - name: ffmpeg
+    # Same options as tools/ffmpeg-minimal/build.sh and tools/Setup-MacDeps.sh, without a hardware decoder.
+    config-opts: [--enable-version3, --disable-debug, --enable-shared, --disable-static, --enable-pthreads,
+      --disable-autodetect, --enable-zlib, --enable-lzma, --enable-libdav1d, --enable-libzimg, --enable-libjxl,
+      --disable-programs, --disable-doc, --disable-avdevice, --disable-network, --disable-encoders, --disable-muxers,
+      --disable-devices, --disable-protocols, --enable-protocol=file, --disable-filters,
+      '--enable-filter=buffer,buffersink,null,format,scale,zscale,tonemap,transpose,hflip,vflip', --extra-version=compareel-min]
+    sources:
+      - type: archive
+        path: ../../third_party/ffmpeg/FFmpeg-92611900bb.tar.gz
+
+  - name: libheif
+    buildsystem: cmake-ninja
+    # Same configuration as tools/Build-Heif.cmd: HEVC and AV1 decode through the FFmpeg above, no plugin loading.
+    config-opts: [-DCMAKE_BUILD_TYPE=Release, -DCMAKE_INSTALL_LIBDIR=lib, -DWITH_FFMPEG_DECODER=ON, -DWITH_FFMPEG_DECODER_PLUGIN=OFF,
+      -DENABLE_PLUGIN_LOADING=OFF, -DWITH_LIBDE265=OFF, -DWITH_X265=OFF, -DWITH_X264=OFF, -DWITH_OpenH264_DECODER=OFF,
+      -DWITH_AOM_DECODER=OFF, -DWITH_AOM_ENCODER=OFF, -DWITH_DAV1D=OFF, -DWITH_KVAZAAR=OFF, -DWITH_JPEG_DECODER=OFF,
+      -DWITH_JPEG_ENCODER=OFF, -DWITH_OpenJPEG_DECODER=OFF, -DWITH_OpenJPEG_ENCODER=OFF, -DWITH_LIBSHARPYUV=OFF,
+      -DWITH_LIBSHARPYUV_INTERNAL=OFF, -DWITH_EXAMPLES=OFF, -DWITH_GDK_PIXBUF=OFF, -DBUILD_TESTING=OFF,
+      -DBUILD_DOCUMENTATION=OFF, -DENABLE_PARALLEL_TILE_DECODING=OFF]
+    sources:
+      - type: archive
+        path: ../../third_party/libheif-1.23.7/libheif-1.23.7.tar.gz
+
+  - name: compareel
+    buildsystem: cmake-ninja
+    config-opts: [-DCMAKE_BUILD_TYPE=Release]
+    sources:
+      - type: dir
+        path: ../..
+        # Local SDKs, build output and notes are not part of the source.
+        skip: [.deps, .build, .build-ui, release, docs, build-mac, .git]

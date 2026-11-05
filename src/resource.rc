@@ -1,0 +1,37 @@
+#include <windows.h>
+
+1 RT_MANIFEST "app.manifest"
+1 ICON "qt/branding/app.ico"
+
+VS_VERSION_INFO VERSIONINFO
+#ifndef COMPAREEL_FILE_VERSION
+#define COMPAREEL_FILE_VERSION 1,1,0,0
+#endif
+FILEVERSION     COMPAREEL_FILE_VERSION
+PRODUCTVERSION  COMPAREEL_FILE_VERSION
+FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
+FILEFLAGS       0x0L
+FILEOS          VOS_NT_WINDOWS32
+FILETYPE        VFT_APP
+FILESUBTYPE     VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName",      "Ensar Yanar\0"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 Ensar Yanar\0"
+            VALUE "FileDescription",  "Compareel - Video Comparison and Duplicate Review\0"
+            VALUE "FileVersion",      COMPAREEL_DISPLAY_VERSION
+            VALUE "InternalName",     "Compareel.exe\0"
+            VALUE "OriginalFilename", "Compareel.exe\0"
+            VALUE "ProductName",      "Compareel\0"
+            VALUE "ProductVersion",   COMPAREEL_DISPLAY_VERSION
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0409, 1200
+    END
+END
+

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=Compareel
+GenericName=Duplicate Video and Image Finder
+Comment=Find, compare and clean up duplicate videos and images
+Exec=Compareel %F
+Icon=io.github.turxlab.Compareel
+Terminal=false
+Categories=AudioVideo;Video;Graphics;Utility;
+MimeType=video/mp4;video/x-matroska;video/quicktime;video/webm;video/x-msvideo;image/jpeg;image/png;image/webp;image/heic;image/avif;inode/directory;

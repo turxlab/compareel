@@ -1,0 +1,29 @@
+title: Compareel
+description: User guide for Compareel, a local duplicate and similar video and image finder for Windows, macOS, and Linux.
+url: https://turxlab.github.io
+baseurl: /compareel
+remote_theme: just-the-docs/just-the-docs@v0.10.2
+
+plugins:
+  - jekyll-remote-theme
+  - jekyll-relative-links
+  - jekyll-seo-tag
+  - jekyll-sitemap
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      image: /assets/screenshot-compare.png
+
+color_scheme: dark
+search_enabled: true
+heading_anchors: true
+
+aux_links:
+  "Compareel on GitHub":
+    - "https://github.com/turxlab/compareel"
+  "Download":
+    - "https://github.com/turxlab/compareel/releases/latest"
+
+footer_content: "Compareel is free software under the GNU GPL v3. © 2026 Ensar Yanar."

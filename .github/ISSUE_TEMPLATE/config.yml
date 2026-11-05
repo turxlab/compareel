@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Supported formats and limits
+    url: https://github.com/turxlab/compareel/blob/main/packaging/SUPPORTED_FORMATS.md
+    about: Check supported video and image formats, codecs and file limits before opening an issue.

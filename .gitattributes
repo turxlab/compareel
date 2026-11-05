@@ -1,0 +1,28 @@
+* text=auto
+
+# POSIX scripts, workflows and Linux/macOS metadata
+*.sh      text eol=lf
+*.yml     text eol=lf
+*.yaml    text eol=lf
+*.desktop text eol=lf
+*.xml     text eol=lf
+*.in      text eol=lf
+
+# Windows scripts, installer and resource files
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+*.iss text eol=crlf
+*.rc  text eol=crlf
+
+# Images, icons, archives and binaries
+*.png    binary
+*.ico    binary
+*.icns   binary
+*.jpg    binary
+*.gif    binary
+*.zip    binary
+*.tar.gz binary
+*.tar.xz binary
+*.dll    binary
+*.exe    binary
