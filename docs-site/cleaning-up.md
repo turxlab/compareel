@@ -1,5 +1,6 @@
 ---
 title: Cleaning up
+description: Safely move duplicate copies to the Recycle Bin or Trash, protect reference folders, copy, move, or quarantine files, and undo file operations.
 nav_order: 5
 ---
 

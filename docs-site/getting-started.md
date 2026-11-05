@@ -1,5 +1,6 @@
 ---
 title: Getting started
+description: Download and install Compareel on Windows, macOS, or Linux, handle first-run prompts, and start your first duplicate video or image scan.
 nav_order: 2
 ---
 

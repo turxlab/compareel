@@ -1,5 +1,6 @@
 ---
 title: User Guide
+description: Compareel is a free, open-source (GPL-3.0) duplicate and visually similar video and image finder for Windows, macOS, and Linux with side-by-side comparison.
 nav_order: 1
 ---
 
@@ -7,9 +8,13 @@ nav_order: 1
 
 Compareel is a free, open-source (GPL-3.0) desktop program for Windows, macOS, and Linux. It finds duplicate and visually similar videos and images on your computer and lets you compare them side by side before moving unwanted copies to the Recycle Bin (Trash on macOS and Linux). Everything runs locally on your machine.
 
-**Download the latest release:** [github.com/turxlab/compareel/releases/latest](https://github.com/turxlab/compareel/releases/latest)
+<div data-nosnippet markdown="1">
+
+**Download the latest release:** [GitHub Releases](https://github.com/turxlab/compareel/releases/latest)
 
 ![Compareel welcome screen](assets/screenshot-welcome.png)
+
+</div>
 
 ## Guide contents
 

@@ -1,8 +1,9 @@
 title: Compareel
-description: User guide for Compareel, a local duplicate and similar video and image finder for Windows, macOS, and Linux.
+description: Free, open-source duplicate and similar video and image finder for Windows, macOS, and Linux. Compare media side by side locally before cleaning up.
 url: https://turxlab.github.io
 baseurl: /compareel
 remote_theme: just-the-docs/just-the-docs@v0.10.2
+favicon_ico: "/favicon.ico"
 
 plugins:
   - jekyll-remote-theme
@@ -15,6 +16,9 @@ defaults:
       path: ""
     values:
       image: /assets/screenshot-compare.png
+
+webmaster_verifications:
+  google: QrtQZIqbi9cKysiGJUxIzbhmn7vc_04xOAqyH1CQaFU
 
 color_scheme: dark
 search_enabled: true

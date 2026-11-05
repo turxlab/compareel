@@ -1,5 +1,6 @@
 ---
 title: Scanning
+description: Configure Exact copies, Similar videos, Similar images, and Advanced criteria scans, manage folders and file filters, and detect partial video clips.
 nav_order: 3
 ---
 

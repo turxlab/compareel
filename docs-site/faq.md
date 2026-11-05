@@ -1,5 +1,6 @@
 ---
 title: Frequently asked questions
+description: Answers to common questions about exact vs. similar matches, Not compared file counts, supported media formats, first-run warnings, and bug reports.
 nav_order: 7
 ---
 

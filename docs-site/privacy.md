@@ -1,5 +1,6 @@
 ---
 title: Privacy and local data
+description: Learn how Compareel processes all videos and images locally on your computer with zero telemetry, how Privacy mode works, and how to clear local history.
 nav_order: 6
 ---
 

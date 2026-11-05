@@ -1,5 +1,6 @@
 ---
 title: Reviewing
+description: Compare duplicate and similar videos or images side by side with linked playback, time offsets, Wipe, Overlay, Difference views, and review decisions.
 nav_order: 4
 ---
 
