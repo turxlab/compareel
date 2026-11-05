@@ -16,6 +16,9 @@ defaults:
     values:
       image: /assets/screenshot-compare.png
 
+webmaster_verifications:
+  google: QrtQZIqbi9cKysiGJUxIzbhmn7vc_04xOAqyH1CQaFU
+
 color_scheme: dark
 search_enabled: true
 heading_anchors: true
