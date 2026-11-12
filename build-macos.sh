@@ -5,7 +5,7 @@
 # Usage: ./build-macos.sh [--package VERSION] [--arch universal|arm64|x86_64]
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")" && pwd)
-VERSION=1.0.0 PACKAGE=0 ARCH=universal
+VERSION=1.1.0 PACKAGE=0 ARCH=universal
 while [ $# -gt 0 ]; do
     case "$1" in
         --package) PACKAGE=1; VERSION=$2; shift 2 ;;
@@ -66,6 +66,10 @@ RESOURCES="$APP/Contents/Resources"
         sed -e 's/[[:space:]]*$//' "$2"
     }
     for license in "$ROOT"/third_party/qt-6.8.3/LICENSES/*; do section "Qt 6.8.3 - $(basename "${license%.*}")" "$license"; done
+    section "QtSvg 6.8.3 - XSVG" "$ROOT/third_party/qt-6.8.3/qtsvg/XSVG_LICENSE.txt"
+    section "Qt Image Formats 6.8.3 - libtiff" "$ROOT/third_party/qt-6.8.3/qtimageformats/LICENSES/libtiff.txt"
+    section "Qt Image Formats 6.8.3 - libwebp" "$ROOT/third_party/qt-6.8.3/qtimageformats/src/3rdparty/libwebp/COPYING"
+    section "Qt Image Formats 6.8.3 - libwebp PATENTS" "$ROOT/third_party/qt-6.8.3/qtimageformats/src/3rdparty/libwebp/PATENTS"
     section "FFmpeg - LGPL-3.0" "$ROOT/third_party/ffmpeg/COPYING.LGPLv3"
     section "libheif 1.23.7 - LGPL-3.0" "$ROOT/third_party/libheif-1.23.7/COPYING"
     section "Lucide icons - ISC" "$ROOT/third_party/lucide/LICENSE"

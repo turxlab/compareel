@@ -38,9 +38,9 @@ bool validName(const QString& name) { return Platform::IsValidFileName(name.toSt
 }
 void MainWindow::chooseBatchTransfer(bool move,const QString& suppliedFolder) {
     if(scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_ || groups_.empty()) return;
-    std::vector<VideoFileInfo> jobs; std::set<std::pair<uint64_t,uint64_t>> seen; unsigned excluded=0;
+    std::vector<VideoFileInfo> jobs; std::set<std::wstring> seen; unsigned excluded=0;
     for(const auto& group:groups_) for(int i:group.fileIndices) {
-        const auto& f=files_[i]; if(f.deleted || !f.identity.valid || !seen.emplace(f.identity.volume,f.identity.index).second) continue;
+        const auto& f=files_[i]; if(f.deleted || !f.identity.valid || !seen.insert(PhysicalFileKey(f)).second) continue;
         if(move && (f.protectedFile || f.protectedByFolder || protectedByReview(f))) { ++excluded; continue; }
         VideoFileInfo job; job.fullPath=f.fullPath; job.fileName=f.fileName; job.identity=f.identity; job.fileSize=f.fileSize; jobs.push_back(std::move(job));
     }
@@ -95,7 +95,11 @@ void MainWindow::chooseBatchTransfer(bool move,const QString& suppliedFolder) {
         if(result.error.isEmpty()) finishCleanupRecovery();
         if(!result.moved.empty()) refreshTransferResults(); else if(currentGroup_>=0) selectGroup(currentGroup_);
         updateUndoAction(); statusBar()->showMessage(text("Copied: %1 · moved: %2. See operation history; Undo applies one file at a time.").arg(result.copied).arg(result.moved.size()));
-        if(!result.error.isEmpty()) QMessageBox::warning(this,text("Transfer results"),result.error);
+        if(!result.error.isEmpty()) {
+            QMessageBox box(QMessageBox::Warning,text("Transfer results"),result.error,QMessageBox::Ok,this);
+            box.setTextFormat(Qt::PlainText);
+            box.exec();
+        }
         if(pendingClose_) close();
     });
     watcher->setFuture(QtConcurrent::run([this,jobs=std::move(jobs),destinations,move,oldLeft,oldRight,progress] {

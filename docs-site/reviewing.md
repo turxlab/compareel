@@ -13,7 +13,7 @@ Compareel shows two files side by side above the list of result groups so you ca
 ## Side-by-side layout
 
 - **Reference (left panel)** — The first file in the active group row (badged **Ref**) is loaded on the left and kept by default.
-- **Candidate (right panel)** — The selected candidate in the group (or **Candidate X/Y** when a group has three or more files) is loaded on the right. Click any thumbnail in a group row to compare it on the right, or use the candidate dropdown on the right panel.
+- **Candidate (right panel)** — The selected candidate in the group (or **Candidate X/Y** when a group has three or more files) is loaded on the right. Click any thumbnail in a group row (or use **Next pair** or the arrow keys in the results list) to compare it on the right.
 - **Change the reference for one group** — Right-click a candidate thumbnail in the group row and choose **Make reference** to move that file to the left panel for that group.
 - **Metadata bar and File details** — Under each preview, Compareel shows file size, duration (videos), resolution, and codec or format. Values that differ between the left and right file are highlighted. Click **Details…** to open **File details**, which also lists frame rate, video bitrate, audio codec/channels/sample rate, embedded **Subtitles** track counts, and the file's modified timestamp. Note that embedded subtitles are listed for inspection only; they are not rendered during playback or compared during scans.
 - **Panel buttons** — Each panel header has three buttons: **Protect this file** (lock icon), **Show in Explorer** (**Show in Finder** on macOS, **Show in file manager** on Linux), and **Move to Recycle Bin** (**Move to Trash** on macOS and Linux).
@@ -24,7 +24,7 @@ In **Videos** mode, the chain button between the two seek bars (or **Playback** 
 
 - Playing, pausing (`Space`), scrubbing, seeking, restarting (**Playback** > **Restart both**, `Ctrl+Home`), and stepping one frame backward or forward (**Previous frame** / **Next frame**) move both videos together.
 - The left player starts with audio enabled and the right player starts muted so both tracks do not talk over each other. Use **Mute / unmute** on either side to switch audio.
-- **Offset** (-3600 to +3600 seconds) shifts the right video relative to the left. Positive values show a later moment on the right. Click **Reset alignment** next to **Offset** to return to `0.000 s`, or click **Auto-align partial clip** (`Ctrl+Shift+A`, `Cmd+Shift+A` on macOS) to estimate the offset between a trimmed clip and a longer video.
+- **Offset** (-86400 to +86400 seconds) shifts the right video relative to the left. Positive values show a later moment on the right. Click **Reset alignment** next to **Offset** to return to `0.000 s`, or click **Auto-align partial clip** (`Ctrl+Shift+A`, `Cmd+Shift+A` on macOS) to estimate the offset between a trimmed clip and a longer video.
 - **Compare sampled audio** — Choose **Tools** > **Compare sampled audio** to check three short audio windows of the primary audio track at the current offset. The result is informational only and never authorizes automatic deletion.
 
 In **Images** mode:
@@ -78,8 +78,10 @@ The bar directly above the result rows controls which groups are shown and how f
   - **Longest duration** (videos only)
   - **Oldest file**
   - **Newest file**
+  - **Oldest creation date**
+  - **Oldest date taken (EXIF)** (images only)
   - **First by name**
-- **Sort groups** — Orders the result list by **Largest first**, **Smallest first**, **Longest first** (videos only), **Shortest first** (videos only), **Highest resolution**, **Lowest resolution**, or **Filename**.
+- **Sort groups** — Orders the result list by **Largest first**, **Smallest first**, **Longest first** (videos only), **Shortest first** (videos only), **Highest resolution**, **Lowest resolution**, **Filename**, **Highest similarity**, or **Lowest similarity**.
 
 You can also export all current result groups to CSV via **File** > **Export results…**.
 
@@ -117,7 +119,7 @@ Press `F1` (**Help** > **Keyboard shortcuts**) at any time to view shortcuts ins
 | Hold `B` (on focused preview) | Hold `B` | Show the other file while held |
 | `Ctrl+Shift+,` | `Cmd+Shift+,` | **Scan rules…** |
 | `Ctrl+,` | `Cmd+,` | **Settings…** |
-| `Ctrl+Shift+H` | `Cmd+Shift+H` | **Privacy mode** |
+| `Ctrl+Shift+H` | `Cmd+Shift+H` | **Hide all previews** |
 | `F1` | `F1` | **Keyboard shortcuts** |
 | `Alt+F4` / `Ctrl+Q` | `Cmd+Q` | **Exit** (**Quit Compareel** on macOS) |
 

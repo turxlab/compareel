@@ -42,26 +42,57 @@ FileIdentity ReadFileIdentity(const std::wstring& path, DWORD* error) {
         true};
 }
 
-std::string HashFileSha256(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error) {
+std::string HashFileSha256(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error, const FileIdentity& expected) {
     error = S_OK;
     HANDLE file = CreateFileW(NativeFilePath(path).c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-                              FILE_FLAG_SEQUENTIAL_SCAN, nullptr);
+                              FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
     if (file == INVALID_HANDLE_VALUE) { error = HRESULT_FROM_WIN32(GetLastError()); return {}; }
+    if (GetFileType(file) != FILE_TYPE_DISK) {
+        CloseHandle(file);
+        error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        return {};
+    }
+    BY_HANDLE_FILE_INFORMATION info{};
+    if (!GetFileInformationByHandle(file, &info)) {
+        error = HRESULT_FROM_WIN32(GetLastError());
+        CloseHandle(file);
+        return {};
+    }
+    if (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) {
+        CloseHandle(file);
+        error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+        return {};
+    }
+    const FileIdentity opened{
+        info.dwVolumeSerialNumber,
+        (uint64_t(info.nFileIndexHigh) << 32) | info.nFileIndexLow,
+        (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow,
+        (uint64_t(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime,
+        true
+    };
+    if (expected.valid && opened != expected) {
+        CloseHandle(file);
+        error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+        return {};
+    }
     BCRYPT_ALG_HANDLE algorithm = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
     NTSTATUS status = BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM, nullptr, 0);
     if (status >= 0) status = BCryptCreateHash(algorithm, &hash, nullptr, 0, nullptr, 0, 0);
     std::vector<uint8_t> buffer(1024 * 1024);
+    uint64_t totalRead = 0;
     while (status >= 0 && !cancel.load()) {
         DWORD bytes = 0;
         if (!ReadFile(file, buffer.data(), static_cast<DWORD>(buffer.size()), &bytes, nullptr)) {
             error = HRESULT_FROM_WIN32(GetLastError()); break;
         }
         if (!bytes) break;
+        totalRead += bytes;
         status = BCryptHashData(hash, buffer.data(), bytes, 0);
     }
     std::array<uint8_t, 32> digest{};
     if (cancel.load()) error = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    if (SUCCEEDED(error) && totalRead != opened.size) error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
     if (status >= 0 && SUCCEEDED(error)) status = BCryptFinishHash(hash, digest.data(), static_cast<ULONG>(digest.size()), 0);
     if (status < 0) error = HRESULT_FROM_NT(status);
     if (hash) BCryptDestroyHash(hash);
@@ -139,7 +170,7 @@ FileOperations::TransferResult TransferFile(
         result.error = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED);
         return result;
     }
-    result.contentHash = HashFileSha256(source, cancel, result.error);
+    result.contentHash = HashFileSha256(source, cancel, result.error, expected);
     if (FAILED(result.error)) return result;
     if (!expectedHash.empty() && result.contentHash != expectedHash) {
         result.error = HRESULT_FROM_WIN32(ERROR_CRC);
@@ -199,7 +230,7 @@ FileOperations::TransferResult TransferFile(
     }
     if (ReadFileIdentity(source) != expected) return discardCopy(HRESULT_FROM_WIN32(ERROR_FILE_INVALID));
     HRESULT hashError = S_OK;
-    const auto destinationHash = HashFileSha256(destination, cancel, hashError);
+    const auto destinationHash = HashFileSha256(destination, cancel, hashError, result.destinationIdentity);
     if (FAILED(hashError)) return discardCopy(hashError);
     if (destinationHash != result.contentHash) return discardCopy(HRESULT_FROM_WIN32(ERROR_CRC));
     if (kind == TransferKind::Move) {
@@ -247,10 +278,10 @@ FileOperations::TransferResult UndoTransferFile(
         result.error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
         return result;
     }
-    const auto originalHash = HashFileSha256(source, cancel, result.error);
+    const auto originalHash = HashFileSha256(source, cancel, result.error, originalSource);
     if (FAILED(result.error)) return result;
     if (originalHash != hash) { result.error = HRESULT_FROM_WIN32(ERROR_CRC); return result; }
-    const auto destinationHash = HashFileSha256(destination, cancel, result.error);
+    const auto destinationHash = HashFileSha256(destination, cancel, result.error, createdDestination);
     if (FAILED(result.error)) return result;
     if (destinationHash != hash) { result.error = HRESULT_FROM_WIN32(ERROR_CRC); return result; }
     if (cancel.load()) { result.error = HRESULT_FROM_WIN32(ERROR_CANCELLED); return result; }

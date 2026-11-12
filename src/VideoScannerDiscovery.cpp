@@ -118,7 +118,7 @@ bool VideoScanner::IsImageExtension(const std::wstring& fileName) {
         L".exr", L".hdr", L".pic",
         L".dds", L".pcx", L".qoi",
         L".sgi", L".rgb", L".bw", L".rgba",
-        L".ras", L".sun", L".dpx", L".iff", L".lbm",
+        L".ras", L".sun", L".dpx", L".iff", L".ilbm", L".lbm",
         // Camera RAW formats
         L".dng", L".cr2", L".cr3", L".nef", L".nrw",
         L".arw", L".srf", L".sr2", L".raf", L".orf",
@@ -149,7 +149,7 @@ std::vector<VideoFileInfo> VideoScanner::DiscoverVideos(
     }
 
     auto tryAddDiscoveredFile = [&](std::wstring fullPath, std::wstring fname, const std::wstring& parentDir,
-                                    uint64_t fsize, uint64_t lastWriteTime) {
+                                    uint64_t fsize, uint64_t createdTime) {
         if (criteria && std::any_of(criteria->excludedFolders.begin(), criteria->excludedFolders.end(),
             [&](const auto& folder) { return WithinFolder(fullPath, folder); })) return;
         if (!(criteria && criteria->images ? IsImageExtension(fname) : IsVideoExtension(fname))) return;
@@ -165,10 +165,12 @@ std::vector<VideoFileInfo> VideoScanner::DiscoverVideos(
         }
         bool protectedPath = criteria && std::any_of(criteria->protectedFolders.begin(), criteria->protectedFolders.end(),
             [&](const auto& folder) { return WithinFolder(fullPath, folder); });
-        auto [physical, inserted] = physicalFiles.emplace(std::make_pair(identity.volume, identity.index), result.size());
-        if (!inserted) {
-            if (protectedPath) result[physical->second].protectedFile = result[physical->second].protectedByFolder = true;
-            return;
+        if (HasUniqueFileIndex(identity)) {
+            auto [physical, inserted] = physicalFiles.emplace(std::make_pair(identity.volume, identity.index), result.size());
+            if (!inserted) {
+                if (protectedPath) result[physical->second].protectedFile = result[physical->second].protectedByFolder = true;
+                return;
+            }
         }
         std::wstring fileKey = NormalizePathKey(fullPath);
         if (visitedFiles.insert(fileKey).second) {
@@ -177,10 +179,10 @@ std::vector<VideoFileInfo> VideoScanner::DiscoverVideos(
             v.fileName = std::move(fname);
             v.folderPath = parentDir;
             v.fileSize = fsize;
+            v.createdTime = createdTime;
             v.identity = identity;
             v.protectedFile = protectedPath;
             v.protectedByFolder = v.protectedFile;
-            v.lastWriteTime = lastWriteTime;
             result.push_back(std::move(v));
 
             if (onProgress && (result.size() % 100 == 0)) {
@@ -201,12 +203,12 @@ std::vector<VideoFileInfo> VideoScanner::DiscoverVideos(
         while (clean.size() > 3 && (clean.back() == L'\\' || clean.back() == L'/')) {
             clean.pop_back();
         }
-        uint64_t fsize = 0, lastWrite = 0;
-        if (Platform::StatRegularFile(clean, fsize, lastWrite)) {
+        uint64_t fsize = 0, lastWrite = 0, createdTime = 0;
+        if (Platform::StatRegularFile(clean, fsize, lastWrite, &createdTime)) {
             auto slash = clean.find_last_of(L"\\/");
             std::wstring fname = (slash == std::wstring::npos) ? clean : clean.substr(slash + 1);
             std::wstring parentDir = (slash == std::wstring::npos) ? L"." : clean.substr(0, slash);
-            tryAddDiscoveredFile(clean, std::move(fname), parentDir, fsize, lastWrite);
+            tryAddDiscoveredFile(clean, std::move(fname), parentDir, fsize, createdTime);
             continue;
         }
         std::wstring key = NormalizePathKey(clean);
@@ -235,7 +237,7 @@ std::vector<VideoFileInfo> VideoScanner::DiscoverVideos(
                     }
                 }
             } else {
-                tryAddDiscoveredFile(std::move(entry.fullPath), std::move(entry.fileName), currentDir, entry.fileSize, entry.lastWriteTime);
+                tryAddDiscoveredFile(std::move(entry.fullPath), std::move(entry.fileName), currentDir, entry.fileSize, entry.createdTime);
             }
         }, &enumError) && issues && FAILED(enumError)) {
             issues->push_back({currentDir, enumError});

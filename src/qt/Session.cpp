@@ -82,7 +82,15 @@ bool validFolders(const QJsonValue& value) {
 void MainWindow::saveSession() {
     if(scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_) return;
     auto path=QFileDialog::getSaveFileName(this,Language::text("Save review session…"),{},"Compareel session (*.cvsession)");
-    if(!path.isEmpty() && !saveSessionFile(path)) QMessageBox::warning(this,Language::text("Save review session…"),Language::text("The session could not be saved. Limits: 100,000 files and 32 MiB. Any previous save is kept."));
+    SessionSaveStatus status=SessionSaveStatus::WriteFailed;
+    if(!path.isEmpty() && !saveSessionFile(path,&status)) {
+        const char* reason=status==SessionSaveStatus::LimitExceeded
+            ?"The session exceeds the 100,000-file or 32 MiB snapshot limit. Any previous save is kept."
+            :status==SessionSaveStatus::LowMemory
+            ?"Available memory is too low to save the session safely. Any previous save is kept."
+            :"The session could not be written. Check the destination folder permissions. Any previous save is kept.";
+        QMessageBox::warning(this,Language::text("Save review session…"),Language::text(reason));
+    }
 }
 void MainWindow::loadSession() {
     if(scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_) return;
@@ -93,15 +101,20 @@ void MainWindow::loadSession() {
             loadSessionFile(path,true);
     } else QMessageBox::warning(this,Language::text("Open review session…"),Language::text("This session is invalid or uses an unsupported version."));
 }
-bool MainWindow::saveSessionFile(const QString& path) {
-    auto job=sessionSaveJob(path); return job && job();
+bool MainWindow::saveSessionFile(const QString& path,SessionSaveStatus* status) {
+    auto shared=std::make_shared<SessionSaveStatus>(SessionSaveStatus::WriteFailed);
+    auto job=sessionSaveJob(path,{},shared);
+    const bool ok=job && job();
+    if(status) *status=ok?SessionSaveStatus::Saved:*shared;
+    return ok;
 }
-std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared_ptr<std::atomic<bool>> cancelled) {
-    if(scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_) return {};
-    if(filter_->text().size()>4096) return {};
+std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared_ptr<std::atomic<bool>> cancelled,std::shared_ptr<SessionSaveStatus> status) {
+    auto setStatus=[&](SessionSaveStatus s)->std::function<bool()> { if(status) *status=s; return {}; };
+    if(scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_) return setStatus(SessionSaveStatus::BusyOrInvalid);
+    if(filter_->text().size()>4096) return setStatus(SessionSaveStatus::BusyOrInvalid);
     const uint64_t availRam=Platform::AvailablePhysicalMemoryBytes(UINT64_MAX);
-    if(simulateLowMemorySave_ || (files_.size()>1000 && availRam<minSaveAvailableRamBytes)) return {};
-    struct SavedFile { std::wstring path; FileIdentity id; bool protectedFile,folderProtected; int root; HRESULT error; bool corrupted; std::shared_ptr<VideoFileInfo> evidence; };
+    if(simulateLowMemorySave_ || (files_.size()>1000 && availRam<minSaveAvailableRamBytes)) return setStatus(SessionSaveStatus::LowMemory);
+    struct SavedFile { std::wstring path; FileIdentity id; bool protectedFile,folderProtected; int root; HRESULT error; bool corrupted,previewFailed; uint64_t createdTime; std::shared_ptr<VideoFileInfo> evidence; };
     std::vector<SavedFile> snapshot;
     QJsonArray savedGroups;
     std::vector<std::pair<std::wstring,std::wstring>> rightCandidatePairs;
@@ -116,9 +129,10 @@ std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared
             remap[i]=int(snapshot.size());
             std::shared_ptr<VideoFileInfo> evidence;
             if(resultMembers.contains(i)) { evidence=std::make_shared<VideoFileInfo>(file); std::vector<uint8_t>().swap(evidence->thumbBGRA); }
-            snapshot.push_back({file.fullPath,file.identity,file.protectedFile,file.protectedByFolder,file.comparisonRoot,file.error,file.corrupted,std::move(evidence)});
+            snapshot.push_back({file.fullPath,file.identity,file.protectedFile,file.protectedByFolder,file.comparisonRoot,file.error,file.corrupted,file.previewFailed,file.createdTime,std::move(evidence)});
         }
-        if(snapshot.size()>maxSessionFiles || (manual_ && snapshot.size()!=2)) return {};
+        if(snapshot.size()>maxSessionFiles) return setStatus(SessionSaveStatus::LimitExceeded);
+        if(manual_ && snapshot.size()!=2) return setStatus(SessionSaveStatus::BusyOrInvalid);
         for(const auto& group:groups_) {
             QJsonArray members; int selected=-1;
             for(int slot=0;slot<int(group.fileIndices.size());++slot) {
@@ -137,11 +151,11 @@ std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared
             }
         }
         for(int index:markedFiles_) if(index>=0 && index<int(files_.size()) && !files_[index].deleted) {
-            auto key=identityKey(files_[index].identity);
+            auto key=FileReviewId(files_[index]);
             if(!key.empty()) marks.append(QString::fromStdString(key));
         }
     } catch(const std::bad_alloc&) {
-        return {};
+        return setStatus(SessionSaveStatus::LowMemory);
     }
     const auto& savedCriteria=manual_?options_:scanCriteria_;
     QJsonObject criteria{{"size",savedCriteria.matchSize},{"duration",options_.images?false:savedCriteria.matchDuration},{"resolution",savedCriteria.matchResolution},{"first",savedCriteria.matchFirstFrame},
@@ -156,16 +170,28 @@ std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared
         {"linked",linkAction_->isChecked()},{"filter",filter_->text()},{"marked",marks},
         {"referenceRule",referenceRule_->currentData().toInt()},{"evidenceFilter",evidenceFilter_->currentIndex()}};
     QJsonArray savedIssues;
-    for(const auto& issue:scanIssues_) savedIssues.append(QJsonObject{{"path",QString::fromStdWString(issue.path)},{"error",QString::number(quint32(issue.error))}});
+    for(size_t i=0;i<std::min<size_t>(scanIssues_.size(),size_t(maxSessionFiles));++i) {
+        const auto& issue=scanIssues_[i];
+        savedIssues.append(QJsonObject{{"path",QString::fromStdWString(issue.path)},{"error",QString::number(quint32(issue.error))}});
+    }
     QJsonObject document{{"format","Compareel.session"},{"version",3},{"images",options_.images},{"criteria",criteria},{"view",view},{"groups",savedGroups},
         {"issues",savedIssues},{"elapsedMs",QString::number(lastScanElapsedMs_)},{"outcome",lastScanOutcome_},
         {"manual",manual_},{"profile",manual_?profile_->currentIndex():scanCriteria_.matchContent?0:(scanCriteria_.matchVisualSamples || (scanCriteria_.images && scanCriteria_.matchFirstFrame && !scanCriteria_.matchSize && !scanCriteria_.matchResolution))?1:2},{"folders",names(folders_)},
         {"excluded",names(options_.excludedFolders)},{"protectedFolders",names(options_.protectedFolders)}};
+    if(scanMetrics_.compactedFiles || scanMetrics_.discoveredFiles>0) {
+        document.insert("scanSummary",QJsonObject{
+            {"compacted",scanMetrics_.compactedFiles},
+            {"discovered",QString::number(qulonglong(scanMetrics_.discoveredFiles))},
+            {"outsideLimits",QString::number(qulonglong(scanMetrics_.outsideSizeLimits))},
+            {"uniqueSize",QString::number(qulonglong(scanMetrics_.skippedUniqueSize))}
+        });
+    }
     const bool simulateLowMem=simulateLowMemorySave_;
-    return [snapshot=std::move(snapshot),rightCandidatePairs=std::move(rightCandidatePairs),document=std::move(document),cachePath=cachePath_,path,cancelled,simulateLowMem]() mutable {
+    return [snapshot=std::move(snapshot),rightCandidatePairs=std::move(rightCandidatePairs),document=std::move(document),cachePath=cachePath_,path,cancelled,simulateLowMem,status]() mutable {
+    auto fail=[&](SessionSaveStatus s) { if(status) *status=s; return false; };
     try {
-    if(cancelled && cancelled->load()) return false;
-    if(simulateLowMem || (snapshot.size()>1000 && Platform::AvailablePhysicalMemoryBytes(UINT64_MAX)<minSaveAvailableRamBytes)) return false;
+    if(cancelled && cancelled->load()) return fail(SessionSaveStatus::BusyOrInvalid);
+    if(simulateLowMem || (snapshot.size()>1000 && Platform::AvailablePhysicalMemoryBytes(UINT64_MAX)<minSaveAvailableRamBytes)) return fail(SessionSaveStatus::LowMemory);
     QJsonObject rightCandidates;
     for(const auto& [leftPath,rightPath]:rightCandidatePairs) {
         rightCandidates.insert(QString::fromStdWString(leftPath),QString::fromStdWString(rightPath));
@@ -176,13 +202,13 @@ std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared
 
     ScanCache cache(cachePath);
     const auto ignored=cache.ignoredPairs();
-    if(cancelled && cancelled->load()) return false;
+    if(cancelled && cancelled->load()) return fail(SessionSaveStatus::BusyOrInvalid);
     const auto reviewMap=cache.reviewDecisions();
-    if(!cache.error().isEmpty() || (cancelled && cancelled->load())) return false;
+    if(!cache.error().isEmpty() || (cancelled && cancelled->load())) return fail(SessionSaveStatus::WriteFailed);
 
     const bool needIdentities=!ignored.empty() || !reviewMap.empty();
     std::unordered_set<std::string> identities;
-    if(needIdentities) identities.reserve(snapshot.size());
+    if(needIdentities) identities.reserve(snapshot.size()*2);
 
     // Encoding and compressing evidence dominates large saves; each file is independent, so spread it across cores.
     std::vector<size_t> withEvidence;
@@ -194,16 +220,22 @@ std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared
         if(payload.size()>131072) { oversized.store(true); return; }
         evidence[i]=QString::fromLatin1(qCompress(payload,1).toBase64());
     });
-    if(oversized.load() || (cancelled && cancelled->load())) return false;
+    if(oversized.load()) return fail(SessionSaveStatus::LimitExceeded);
+    if(cancelled && cancelled->load()) return fail(SessionSaveStatus::BusyOrInvalid);
     QJsonArray files;
     size_t count=0;
     for(const auto& file:snapshot) {
-        if(((++count)&4095)==0 && cancelled && cancelled->load()) return false;
+        if(((++count)&4095)==0 && cancelled && cancelled->load()) return fail(SessionSaveStatus::BusyOrInvalid);
         QJsonObject row{{"path",QString::fromStdWString(file.path)},{"identity",identity(file.id)},{"protected",file.protectedFile},{"folderProtected",file.folderProtected},
             {"root",file.root},{"error",QString::number(quint32(file.error))},{"corrupted",file.corrupted}};
+        if(file.previewFailed) row.insert("previewFailed",true);
+        if(file.createdTime>0) row.insert("created",QString::number(file.createdTime));
         if(file.evidence) row.insert("evidence",std::move(evidence[count-1]));
         files.append(row);
-        if(needIdentities) identities.insert(identityKey(file.id));
+        if(needIdentities) {
+            identities.insert(identityKey(file.id));
+            if(!HasUniqueFileIndex(file.id)) identities.insert(FileReviewId(file.id,Platform::NormalizePathKey(file.path)));
+        }
     }
     QJsonArray decisions;
     for(const auto& pair:ignored) {
@@ -215,18 +247,25 @@ std::function<bool()> MainWindow::sessionSaveJob(const QString& path,std::shared
         const auto separator=pair.find('/');
         if(separator!=std::string::npos && identities.contains(pair.substr(0,separator)) && identities.contains(pair.substr(separator+1))) reviews.insert(QString::fromStdString(pair),int(decision));
     }
-    if(decisions.size()>100000 || reviews.size()>100000 || (cancelled && cancelled->load())) return false;
+    if(decisions.size()>100000 || reviews.size()>100000) return fail(SessionSaveStatus::LimitExceeded);
+    if(cancelled && cancelled->load()) return fail(SessionSaveStatus::BusyOrInvalid);
     document.insert("files",files); document.insert("ignoredPairs",decisions); document.insert("reviewDecisions",reviews);
     auto bytes=QJsonDocument(document).toJson(QJsonDocument::Compact);
     // Reject an unreadable session before opening its destination, preserving any previous save.
-    if(bytes.size()>maxSessionBytes || (cancelled && cancelled->load())) return false;
-    QSaveFile output(path); if(!output.open(QIODevice::WriteOnly)) return false;
-    return output.write(bytes)==bytes.size() && !(cancelled && cancelled->load()) && output.commit();
-    } catch(...) { return false; }
+    if(bytes.size()>maxSessionBytes) return fail(SessionSaveStatus::LimitExceeded);
+    if(cancelled && cancelled->load()) return fail(SessionSaveStatus::BusyOrInvalid);
+    QSaveFile output(path); if(!output.open(QIODevice::WriteOnly)) return fail(SessionSaveStatus::WriteFailed);
+    if(output.write(bytes)==bytes.size() && !(cancelled && cancelled->load()) && output.commit()) {
+        if(status) *status=SessionSaveStatus::Saved;
+        return true;
+    }
+    return fail((cancelled && cancelled->load())?SessionSaveStatus::BusyOrInvalid:SessionSaveStatus::WriteFailed);
+    } catch(const std::bad_alloc&) { return fail(SessionSaveStatus::LowMemory); }
+      catch(...) { return fail(SessionSaveStatus::WriteFailed); }
     };
 }
 bool MainWindow::saveLastReview(bool force) {
-    // Privacy mode pauses the automatic last-review file, which records paths; an explicit Save review session still works.
+    // Hiding all previews pauses the automatic last-review file, which records paths; an explicit Save review session still works.
     if(!rememberReviewAction_->isChecked() || privacyAction_->isChecked() || reviewSaving_ || scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_ || currentGroup_<0 || restorePositions_) return false;
     QByteArray token; QDataStream state(&token,QIODevice::WriteOnly);
     const auto quantum=force?1:300000000;
@@ -235,15 +274,27 @@ bool MainWindow::saveLastReview(bool force) {
          <<qint64(left_->player->GetPosition100ns()/quantum)<<qint64(right_->player->GetPosition100ns()/quantum)
          <<left_->player->IsPlaying()<<right_->player->IsPlaying();
     if(!reviewDirty_ && token==lastReviewToken_) return false;
-    auto cancelled=std::make_shared<std::atomic<bool>>(false); auto job=sessionSaveJob(lastReviewPath_,cancelled); if(!job) return false;
+    auto cancelled=std::make_shared<std::atomic<bool>>(false);
+    auto status=std::make_shared<SessionSaveStatus>(SessionSaveStatus::WriteFailed);
+    auto job=sessionSaveJob(lastReviewPath_,cancelled,status);
+    if(!job) {
+        if(*status==SessionSaveStatus::LimitExceeded) {
+            lastReviewToken_=token; reviewDirty_=false;
+            statusBar()->showMessage(Language::text("Automatic review save skipped: result set exceeds the 100,000-file or 32 MiB session limit."));
+        }
+        return false;
+    }
     reviewSaveCancel_=cancelled; reviewSaving_=true; reviewDirty_=false;
     auto watcher=new QFutureWatcher<bool>(this);
     reviewSaveWatcher_=watcher;
-    connect(watcher,&QFutureWatcherBase::finished,this,[this,watcher,token,cancelled] {
+    connect(watcher,&QFutureWatcherBase::finished,this,[this,watcher,token,cancelled,status] {
         const bool saved=watcher->result(); watcher->deleteLater(); reviewSaveWatcher_=nullptr; reviewSaving_=false;
         if(saved) lastReviewToken_=token;
         else if(cancelled->load()) reviewDirty_=true;
-        else statusBar()->showMessage(Language::text("The last review could not be saved. Any previous saved review is kept."));
+        else if(*status==SessionSaveStatus::LimitExceeded) {
+            lastReviewToken_=token;
+            statusBar()->showMessage(Language::text("Automatic review save skipped: result set exceeds the 100,000-file or 32 MiB session limit."));
+        } else statusBar()->showMessage(Language::text("The last review could not be saved. Any previous saved review is kept."));
         resumeReviewAction_->setEnabled(QFileInfo::exists(lastReviewPath_));
         if(pendingClose_) close();
     });
@@ -273,8 +324,11 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
         auto normalized=QDir::toNativeSeparators(QDir::cleanPath(name));
         if(seen.contains(pathKey(normalized))) return false; seen.insert(pathKey(normalized));
         VideoFileInfo file; if(!identity(row["identity"].toArray(),file.identity)) return false;
-        auto physical=QString::number(file.identity.volume)+":"+QString::number(file.identity.index);
-        if(physicalFiles.contains(physical)) return false; physicalFiles.insert(physical);
+        if(HasUniqueFileIndex(file.identity)) {
+            auto physical=QString::number(file.identity.volume)+":"+QString::number(file.identity.index);
+            if(physicalFiles.contains(physical)) return false;
+            physicalFiles.insert(physical);
+        }
         file.fullPath=normalized.toStdWString(); file.fileName=QFileInfo(name).fileName().toStdWString(); file.folderPath=QFileInfo(name).absolutePath().toStdWString();
         if(images ? !VideoScanner::IsImageExtension(file.fullPath) : VideoScanner::IsImageExtension(file.fullPath)) return false;
         file.fileSize=file.identity.size; file.protectedByFolder=row["folderProtected"].toBool(); file.protectedFile=row["protected"].toBool() || file.protectedByFolder; files.push_back(std::move(file));
@@ -283,6 +337,12 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
             const auto error=row["error"].toString().toULongLong(&errorOk);
             if(!errorOk || error>UINT32_MAX || !row["corrupted"].isBool()) return false;
             loaded.error=HRESULT(uint32_t(error)); loaded.corrupted=row["corrupted"].toBool();
+            loaded.previewFailed=row["previewFailed"].toBool(false);
+            if(row.contains("created")) {
+                bool cOk=false; const auto cVal=row["created"].toString().toULongLong(&cOk);
+                if(!cOk) return false;
+                loaded.createdTime=cVal;
+            }
             loaded.comparisonRoot=row["root"].toInt(-1);
             if(loaded.comparisonRoot<-1 || loaded.comparisonRoot>=object["folders"].toArray().size()) return false;
             if(row.contains("evidence")) {
@@ -290,7 +350,7 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
                 if(packed.size()<4 || qFromBigEndian<quint32>(packed.constData())>131072) return false;
                 QByteArray payload(qFromBigEndian<quint32>(packed.constData()),Qt::Uninitialized);
                 uLongf length=payload.size();
-                if(payload.isEmpty() || uncompress(reinterpret_cast<Bytef*>(payload.data()),&length,reinterpret_cast<const Bytef*>(packed.constData()+4),uLong(packed.size()-4))!=Z_OK || length!=uLongf(payload.size()) || !ScanCache::decodeEvidence(payload,loaded)) return false;
+                if(payload.isEmpty() || uncompress(reinterpret_cast<Bytef*>(payload.data()),&length,reinterpret_cast<const Bytef*>(packed.constData()+4),uLong(packed.size()-4))!=Z_OK || length!=uLongf(payload.size()) || !ScanCache::decodeEvidence(payload,loaded,true)) return false;
             }
         }
     }
@@ -322,11 +382,25 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
             savedGroups.push_back(std::move(group));
         }
     }
+    ScanMetrics savedMetrics;
+    if(snapshot && object.contains("scanSummary")) {
+        if(!object["scanSummary"].isObject()) return false;
+        const auto s=object["scanSummary"].toObject();
+        bool dOk=false,oOk=false,uOk=false;
+        const auto dVal=s["discovered"].toString("0").toULongLong(&dOk);
+        const auto oVal=s["outsideLimits"].toString("0").toULongLong(&oOk);
+        const auto uVal=s["uniqueSize"].toString("0").toULongLong(&uOk);
+        if(!dOk || !oOk || !uOk || (s.contains("compacted") && !s["compacted"].isBool())) return false;
+        savedMetrics.compactedFiles=s["compacted"].toBool(false);
+        savedMetrics.discoveredFiles=size_t(dVal);
+        savedMetrics.outsideSizeLimits=size_t(oVal);
+        savedMetrics.skippedUniqueSize=size_t(uVal);
+    }
     ScanCriteria criteria=options_; criteria.images=images; auto c=object["criteria"].toObject(); bool minimum=false,maximum=false,tolerance=false;
     criteria.minFileSize=c["minimum"].toString().toULongLong(&minimum); criteria.maxFileSize=c["maximum"].toString().toULongLong(&maximum);
     criteria.durationTol100ns=c["tolerance"].toString().toLongLong(&tolerance); criteria.minFrameSimilarity=c["threshold"].toDouble(-1);
     int sort=c["sort"].toInt(-1),profile=object["profile"].toInt(-1);
-    if(!minimum || !maximum || !tolerance || criteria.minFileSize>criteria.maxFileSize || criteria.durationTol100ns<0 || criteria.durationTol100ns>600000000 || criteria.minFrameSimilarity<70 || criteria.minFrameSimilarity>100 || sort<0 || sort>6 || profile<0 || profile>2) return false;
+    if(!minimum || !maximum || !tolerance || criteria.minFileSize>criteria.maxFileSize || criteria.durationTol100ns<0 || criteria.durationTol100ns>600000000 || criteria.minFrameSimilarity<70 || criteria.minFrameSimilarity>100 || sort<0 || sort>8 || profile<0 || profile>2) return false;
     criteria.matchTransforms=c["transforms"].toBool(false); criteria.crossFolderOnly=c["crossFolders"].toBool(false);
     if(criteria.crossFolderOnly && object["folders"].toArray().size()<2) return false;
     criteria.matchSize=c["size"].toBool(); criteria.matchDuration=c["duration"].toBool(); criteria.matchResolution=c["resolution"].toBool(); criteria.matchFirstFrame=c["first"].toBool();
@@ -355,19 +429,22 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
     const int legacyLeft=view["leftPreference"].toInt(0),evidenceFilter=view["evidenceFilter"].toInt(0);
     if(legacyLeft<0 || legacyLeft>4 || evidenceFilter<0 || evidenceFilter>=evidenceFilter_->count()) return false;
     const int referenceRule=view.contains("referenceRule")?view["referenceRule"].toInt(-1):legacyLeft==1?int(ReferenceRule::LargestFile):int(ReferenceRule::HighestResolution);
-    if(referenceRule<int(ReferenceRule::HighestResolution) || referenceRule>int(ReferenceRule::NameOrder)) return false;
+    if(referenceRule<int(ReferenceRule::HighestResolution) || referenceRule>int(ReferenceRule::OldestCaptureDate)) return false;
     bool elapsedOk=false; const auto elapsed=object["elapsedMs"].toString().toLongLong(&elapsedOk);
     const auto outcome=object["outcome"].toString();
     if(snapshot && (!elapsedOk || elapsed<0 || (!outcome.isEmpty() && !QStringList{"completed","stopped","paused","failed"}.contains(outcome)))) return false;
     if((view.contains("linked") && !view["linked"].isBool()) || (view.contains("filter") && (!view["filter"].isString() || view["filter"].toString().size()>4096))) return false;
     auto left=view["leftTime"].toString().toLongLong(&leftTime),right=view["rightTime"].toString().toLongLong(&rightTime);
     double zoom=view["zoom"].toDouble(-1),x=view["panX"].toDouble(),y=view["panY"].toDouble();
-    double offset=view["offset"].toDouble(); if(!std::isfinite(offset) || std::abs(offset)>3600) return false;
+    double offset=view["offset"].toDouble(); if(!std::isfinite(offset) || std::abs(offset)>86400) return false;
     int mode=view["mode"].toInt(); if(mode<0 || mode>3) return false;
     if(!leftTime || !rightTime || left<0 || right<0 || zoom<0.5 || zoom>8 || std::abs(x)>1000000 || std::abs(y)>1000000) return false;
     std::unordered_set<std::string> identities;
-    identities.reserve(files.size());
-    for(const auto& file:files) identities.insert(identityKey(file.identity));
+    identities.reserve(files.size()*2);
+    for(const auto& file:files) {
+        identities.insert(identityKey(file.identity));
+        if(!HasUniqueFileIndex(file.identity)) identities.insert(FileReviewId(file));
+    }
     std::set<std::string> decisions;
     std::set<std::string> marks;
     if(view.contains("marked")) {
@@ -379,7 +456,7 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
     auto savedDecisions=object["ignoredPairs"].toArray(); if(savedDecisions.size()>100000) return false;
     for(auto entry:savedDecisions) {
         auto pair=entry.toString().toStdString(); auto separator=pair.find('/');
-        if(pair.size()>170 || separator==std::string::npos || !identities.contains(pair.substr(0,separator)) || !identities.contains(pair.substr(separator+1))) return false;
+        if(pair.size()>220 || separator==std::string::npos || !identities.contains(pair.substr(0,separator)) || !identities.contains(pair.substr(separator+1))) return false;
         decisions.insert(pair);
     }
     ReviewDecisions reviews;
@@ -388,7 +465,7 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
         const auto savedReviews=object["reviewDecisions"].toObject(); if(savedReviews.size()>100000) return false;
         for(auto entry=savedReviews.begin();entry!=savedReviews.end();++entry) {
             const auto pair=entry.key().toStdString(); const auto separator=pair.find('/'); const auto value=entry.value().toInt(-1);
-            if(pair.size()>170 || separator==std::string::npos || !identities.contains(pair.substr(0,separator)) || !identities.contains(pair.substr(separator+1)) || value<1 || value>3 || entry.value().toDouble()!=value) return false;
+            if(pair.size()>220 || separator==std::string::npos || !identities.contains(pair.substr(0,separator)) || !identities.contains(pair.substr(separator+1)) || value<1 || value>3 || entry.value().toDouble()!=value) return false;
             reviews.emplace(pair,static_cast<ReviewDecision>(value));
         }
     }
@@ -417,6 +494,7 @@ bool MainWindow::loadSessionFile(const QString& path,bool rebuildLegacy) {
     restoredFiles_=std::move(files); restoreManual_=object["manual"].toBool();
     restoredGroups_=snapshot?std::optional<std::vector<VideoGroup>>(std::move(savedGroups)):std::nullopt;
     restoredIssues_=std::move(savedIssues);
+    restoredMetrics_=std::move(savedMetrics);
     if(snapshot) { lastScanElapsedMs_=elapsed; lastScanOutcome_=outcome; }
     startScan(); return true;
 }

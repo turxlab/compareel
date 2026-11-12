@@ -4,7 +4,7 @@
 # a two-pass palette GIF with FFmpeg.
 
 param(
-    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'release\v1.0.0\Compareel\Compareel.exe'),
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'release\v1.1.0\Compareel\Compareel.exe'),
     [string]$Demo = 'C:\programs\compareel-demo',
     [string]$OutFile = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs-site\assets\demo.gif'),
     [string]$Ffmpeg = (Join-Path (Split-Path -Parent $PSScriptRoot) '.deps\ffmpeg-8.1\bin\ffmpeg.exe'),

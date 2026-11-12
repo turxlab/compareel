@@ -37,7 +37,7 @@ Compares visual signatures after normalizing EXIF or container orientation, conv
 - **Vector files** (`svg`, `svgz`) are rasterized on white; external references and scripts are rejected.
 - **HDR images** (`exr`, `hdr`, `pic`, `pfm`, `phm`) are tone-mapped for comparison.
 - **Camera RAW files** compare either embedded previews or system-developed RAW images; those two kinds of evidence are never matched against each other.
-- **JPEG XL** (`jxl`) is supported in **Exact copies** mode only. **JPEG XR** (`jxr`, `wdp`, `hdp`) requires Windows (WIC).
+- **JPEG XL** (`jxl`) is decoded through `libjxl` in FFmpeg. **JPEG XR** (`jxr`, `wdp`, `hdp`) requires Windows (WIC).
 
 ### Advanced criteria
 
@@ -73,7 +73,7 @@ Open **Tools** > **Scan rules…** (`Ctrl+Shift+,`, `Cmd+Shift+,` on macOS) or c
   - **Recognize black borders, mirrored and rotated copies** — Enabled by default. Adds tolerance for letterboxing or pillarboxing, horizontal or vertical mirroring, 90-degree rotations, and light center cropping.
 - **Advanced criteria** — The checkboxes used when the comparison mode is **Advanced criteria**.
 - **File filters**
-  - **Minimum size (MB)** and **Maximum size (MB, 0 = unlimited)** — Skip files outside your chosen size range.
+  - **Minimum size** and **Maximum size (0 = unlimited)** — Skip files outside your chosen size range (`KB`, `MB`, or `GB`).
   - **Video extensions** / **Image extensions** — Leave blank to scan all supported formats, or enter a comma-separated list (such as `mp4, mkv, mov`) to scan only those extensions.
   - **Excluded extensions** — Enter a comma-separated list (such as `gif, webp, svg`) to skip specific extensions.
 - **Performance**

@@ -53,6 +53,8 @@ Choose **Review** > **Move other copies to Recycle Bin…** (**Move other copies
    - **Smallest file size**
    - **Newest modified date**
    - **Oldest modified date**
+   - **Oldest creation date**
+   - **Oldest date taken (EXIF)** (images only)
 2. **Preferred folder** — Keep **Any folder (no folder preference)**, or pick a specific folder where kept copies should stay whenever possible.
 3. **Priority order** — Click **How this plan is chosen** in the dialog to see the tie-breaker rules:
    1. **Preferred folder** (if selected)
@@ -84,4 +86,4 @@ To copy or move every unique file across all result groups at once (skipping pro
 - **Remember last review:** When **Remember last review** is enabled in **Tools** > **Settings…** (on by default), Compareel saves your active review in the background (`last-review.cvsession`) so you can reopen it with **File** > **Resume last review** (or from the welcome card). Use **Forget last review** in **Settings** (or **File** > **Forget saved last review…**) to delete that saved review and turn remembering off.
 - **Recover an interrupted cleanup:** Before any Recycle Bin (Trash) removal or file transfer, Compareel writes `last-cleanup.cvsession`. If Compareel or your computer stops mid-cleanup, choose **File** > **Recover last cleanup review…** to reopen the review. Compareel never repeats interrupted file operations automatically.
 
-Next: [Privacy and local data](privacy.md) explains where local caches and sessions are stored, how **Privacy mode** works, and how to clear local records.
+Next: [Privacy and local data](privacy.md) explains where local caches and sessions are stored, how **Hide all previews** works, and how to clear local records.

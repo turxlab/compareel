@@ -33,7 +33,12 @@ public:
             widget->setWindowTitle(widget->windowTitle().chopped(1).trimmed());
         if(event->type()==QEvent::ToolTipChange) if(auto widget=qobject_cast<QWidget*>(object)) {
             const auto tip=widget->toolTip();
-            if(tip.size()>100 && !Qt::mightBeRichText(tip)) widget->setToolTip("<p>"+tip.toHtmlEscaped().replace('\n',"<br>")+"</p>");
+            if(tip.isEmpty() || widget->property("richToolTip").toBool() || widget->property("_wrappedToolTip").toString()==tip) return false;
+            if(tip.size()>100 || Qt::mightBeRichText(tip)) {
+                const auto wrapped="<p>"+tip.toHtmlEscaped().replace('\n',"<br>")+"</p>";
+                widget->setProperty("_wrappedToolTip",wrapped);
+                widget->setToolTip(wrapped);
+            }
         }
         return false;
     }

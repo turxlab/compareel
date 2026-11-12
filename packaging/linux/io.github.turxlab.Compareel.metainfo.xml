@@ -32,19 +32,20 @@
   <screenshots>
     <screenshot type="default">
       <caption>Side-by-side video comparison</caption>
-      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.0.0/docs-site/assets/screenshot-compare.png</image>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.1.0/docs-site/assets/screenshot-compare.png</image>
     </screenshot>
     <screenshot>
       <caption>Similar image groups and keep rules</caption>
-      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.0.0/docs-site/assets/screenshot-results.png</image>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.1.0/docs-site/assets/screenshot-results.png</image>
     </screenshot>
     <screenshot>
       <caption>Start screen and scan modes</caption>
-      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.0.0/docs-site/assets/screenshot-welcome.png</image>
+      <image type="source" width="1280" height="800">https://raw.githubusercontent.com/turxlab/compareel/v1.1.0/docs-site/assets/screenshot-welcome.png</image>
     </screenshot>
   </screenshots>
   <content_rating type="oars-1.1"/>
   <releases>
+    <release version="1.1.0" date="2026-11-12"/>
     <release version="1.0.0" date="2026-11-04"/>
   </releases>
 </component>

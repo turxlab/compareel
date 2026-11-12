@@ -60,9 +60,9 @@ void MainWindow::startScan(bool resume) {
     scanCriteria_=activeCriteria(); cancel_.store(false); scanning_=true; ++generation_; pendingPreviews_.clear(); previewRuns_.clear(); requestedSamples_.clear();
     updateScanTimeLabel();
     previewPool_.waitForDone();
-    pausedScan_=false; saveSettings();
+    pausedScan_=false; scanPausable_=!snapshot && (!folders_.empty() || (restoredFiles_ && !restoreManual_)); saveSettings();
     settings_.setValue("scanInProgress",!snapshot && !folders_.empty()); settings_.sync();
-    pauseAction_->setEnabled(!snapshot); resumeAction_->setEnabled(false);
+    pauseAction_->setEnabled(scanPausable_); resumeAction_->setEnabled(false);
     updateSourceSummary();
     foldersAction_->setEnabled(false); rescanAction_->setEnabled(false); stopAction_->setEnabled(true); profile_->setEnabled(false); if(similarityThreshold_) similarityThreshold_->setEnabled(false); sort_->setEnabled(false); results_->setEnabled(false);
     progress_->setRange(0,0); progress_->show(); statusBar()->showMessage(text(snapshot?"Checking saved results…":"Scanning…")); updateEmptyState();
@@ -70,13 +70,16 @@ void MainWindow::startScan(bool resume) {
     auto restored=std::move(restoredFiles_); restoredFiles_.reset(); bool restoredManual=restoreManual_; QPointer<MainWindow> self(this);
     auto savedGroups=std::move(restoredGroups_); restoredGroups_.reset();
     auto savedIssues=std::move(restoredIssues_); restoredIssues_.clear();
-    scanThread_=std::thread([self,roots,criteria,generation,cachePath,resume,restored=std::move(restored),savedGroups=std::move(savedGroups),savedIssues=std::move(savedIssues),restoredManual,this] () mutable {
+    auto savedMetrics=std::move(restoredMetrics_); restoredMetrics_={};
+    scanThread_=std::thread([self,roots,criteria,generation,cachePath,resume,restored=std::move(restored),savedGroups=std::move(savedGroups),savedIssues=std::move(savedIssues),savedMetrics=std::move(savedMetrics),restoredManual,this] () mutable {
         Platform::ComInit com(Platform::ComApartment::MultiThreaded);
         auto result=std::make_shared<ScanResult>();
         try {
             if(savedGroups && restored) {
+                ScanCache cache(cachePath);
+                result->ignoredPairs=cache.ignoredPairs();
                 result->restored=true; result->manual=restoredManual; result->files=std::move(*restored); result->groups=std::move(*savedGroups);
-                result->issues=std::move(savedIssues);
+                result->issues=std::move(savedIssues); result->metrics=std::move(savedMetrics);
                 QSet<int> checked;
                 for(auto& group:result->groups) {
                     const int selected=group.fileIndices[group.rightSlot];
@@ -92,6 +95,7 @@ void MainWindow::startScan(bool resume) {
                     std::erase_if(group.fileIndices,[&](int index) { return result->files[index].deleted; });
                     auto choice=std::find(group.fileIndices.begin(),group.fileIndices.end(),selected);
                     group.rightSlot=choice!=group.fileIndices.end() && choice!=group.fileIndices.begin()?int(choice-group.fileIndices.begin()):1;
+                    group.bestFrameSim=group.fileIndices.size()>=2?VideoScanner::ComputePairSimilarity(result->files[group.fileIndices[0]],result->files[group.fileIndices[group.rightSlot]],criteria.matchTransforms):0.0;
                 }
                 std::erase_if(result->groups,[](const auto& group) { return group.fileIndices.size()<2; });
             } else {
@@ -104,7 +108,19 @@ void MainWindow::startScan(bool resume) {
             } else if(!resume && !restored && QFileInfo::exists(manifest) && !QFile::remove(manifest)) {
                 throw std::runtime_error("The previous scan list could not be replaced. Check the data folder permissions.");
             }
-            if(restored && !restoredManual && !roots.empty() && !frozen && !ScanManifest::save(manifest,criteria,*restored)) throw std::runtime_error("The saved session could not be checkpointed for scanning.");
+            if(restored && !restoredManual && !roots.empty() && !frozen) {
+                ScanManifest::SaveStatus manifestStatus=ScanManifest::SaveStatus::Saved;
+                if(!ScanManifest::save(manifest,criteria,*restored,&manifestStatus)) {
+                    if(manifestStatus==ScanManifest::SaveStatus::TooLarge) {
+                        QFile::remove(manifest);
+                        if(self) QMetaObject::invokeMethod(self,[self,generation] {
+                            if(self && self->generation_==generation && self->scanning_) { self->scanPausable_=false; self->pauseAction_->setEnabled(false); }
+                        },Qt::QueuedConnection);
+                    } else {
+                        throw std::runtime_error("The saved session could not be checkpointed for scanning.");
+                    }
+                }
+            }
             auto progress=[self,generation,images=criteria.images,hashing=criteria.matchContent](const ScanProgress& value) {
                 if(!self) return;
                 QMetaObject::invokeMethod(self,[self,generation,value,images,hashing] {
@@ -119,6 +135,7 @@ void MainWindow::startScan(bool resume) {
             };
             if(restored) {
                 result->files=std::move(*restored); result->manual=restoredManual;
+                result->metrics.discoveredFiles=result->files.size();
                 for(auto& file:result->files) {
                     if(cancel_.load()) break;
                     if(FileOperations::ReadIdentity(file.fullPath)!=file.identity) {
@@ -127,17 +144,97 @@ void MainWindow::startScan(bool resume) {
                 }
             } else {
                 result->files=VideoScanner::DiscoverVideos(roots,criteria.includeSubfolders,cancel_,progress,&criteria,&result->issues);
-                if(!cancel_.load() && !ScanManifest::save(manifest,criteria,result->files)) throw std::runtime_error("The scan list could not be saved (100,000 files / 32 MiB limit). Check the data folder permissions.");
+                result->metrics.discoveredFiles=result->files.size();
+                if(!cancel_.load()) {
+                    ScanManifest::SaveStatus manifestStatus=ScanManifest::SaveStatus::Saved;
+                    if(!ScanManifest::save(manifest,criteria,result->files,&manifestStatus)) {
+                        if(manifestStatus==ScanManifest::SaveStatus::TooLarge && (criteria.matchContent || criteria.matchSize)) {
+                            std::map<uint64_t,unsigned> sizes;
+                            size_t outsideLimits=0;
+                            for(const auto& f:result->files) {
+                                if(f.deleted) continue;
+                                if(f.fileSize<criteria.minFileSize || f.fileSize>criteria.maxFileSize) ++outsideLimits;
+                                else ++sizes[f.fileSize];
+                            }
+                            const size_t beforePrune=result->files.size();
+                            std::erase_if(result->files,[&](const VideoFileInfo& f) {
+                                if(f.deleted) return true;
+                                if(f.fileSize<criteria.minFileSize || f.fileSize>criteria.maxFileSize) return true;
+                                return sizes[f.fileSize]<2;
+                            });
+                            result->metrics.outsideSizeLimits+=outsideLimits;
+                            result->metrics.skippedUniqueSize+=(beforePrune-outsideLimits-result->files.size());
+                            result->metrics.compactedFiles=true;
+                            ScanManifest::save(manifest,criteria,result->files,&manifestStatus);
+                        }
+                        if(manifestStatus==ScanManifest::SaveStatus::TooLarge) {
+                            QFile::remove(manifest);
+                            if(self) QMetaObject::invokeMethod(self,[self,generation] {
+                                if(self && self->generation_==generation && self->scanning_) { self->scanPausable_=false; self->pauseAction_->setEnabled(false); }
+                            },Qt::QueuedConnection);
+                        } else if(manifestStatus!=ScanManifest::SaveStatus::Saved) {
+                            throw std::runtime_error("The scan list could not be saved. Check the data folder permissions.");
+                        }
+                    }
+                }
             }
             ScanCache cache(cachePath);
             criteria.ignoredPairs=cache.ignoredPairs();
-            for(auto& file:result->files) { if(cancel_.load()) break; if(!file.deleted && cache.restore(file)) ++result->cacheHits; }
+            result->ignoredPairs=criteria.ignoredPairs;
+            result->cacheHits=cache.restoreBatch(result->files,cancel_);
             CacheWriter checkpoints(cachePath);
             if(result->manual) {
                 VideoGroup group; for(int i=0;i<static_cast<int>(result->files.size());++i) if(!result->files[i].deleted) group.fileIndices.push_back(i);
                 if(group.fileIndices.size()==2) result->groups.push_back(std::move(group));
-            } else VideoScanner::AnalyzeAndGroup(result->files,criteria,result->groups,cancel_,progress,[&](const auto& file) { checkpoints.submit(file); },&result->metrics,[&](auto& file) { StillImages::analyze(file,cancel_); });
+            } else VideoScanner::AnalyzeAndGroup(result->files,criteria,result->groups,cancel_,progress,[&](const auto& file) { checkpoints.submit(file); },&result->metrics,[&](auto& file) {
+                if(file.frameLoaded && !file.metadataLoaded && file.width>0 && file.height>0) StillImages::refreshCaptureTime(file,cancel_);
+                else StillImages::analyze(file,cancel_);
+            });
             checkpoints.finish(); result->cacheError=cache.error().isEmpty()?checkpoints.error():cache.error();
+            if(!cancel_.load() && !result->manual) {
+                std::vector<int> remap(result->files.size(),-1);
+                size_t groupedCount=0;
+                for(const auto& group:result->groups) {
+                    for(int idx:group.fileIndices) {
+                        if(idx>=0 && size_t(idx)<remap.size() && remap[idx]!=0) { remap[idx]=0; ++groupedCount; }
+                    }
+                }
+                size_t approxBytes=4096+result->issues.size()*160;
+                for(size_t i=0;i<result->files.size();++i) {
+                    const auto& f=result->files[i];
+                    if(f.deleted) continue;
+                    approxBytes+=150+f.fullPath.size()*2+(remap[i]==0?(f.samples.empty()?1600:2800):0);
+                }
+                const bool canPruneUnmatched=groupedCount<result->files.size() && result->files.size()>512;
+                if(result->files.size()>100000 || (canPruneUnmatched && approxBytes>22*1024*1024)) {
+                    result->metrics.compactedFiles=true;
+                    if(criteria.matchVisualSamples) {
+                        for(const auto& file:result->files) {
+                            if(!file.deleted && !file.corrupted && file.samples.size()==5 &&
+                               std::count_if(file.samples.begin(),file.samples.end(),[](const auto& sample) { return sample.valid; })<3) {
+                                result->metrics.lowVarianceSkipped.push_back(file.fullPath);
+                            }
+                        }
+                    }
+                    std::vector<VideoFileInfo> kept;
+                    for(size_t i=0;i<result->files.size();++i) {
+                        auto& f=result->files[i];
+                        if(remap[i]==0 && !f.deleted) {
+                            remap[i]=int(kept.size());
+                            kept.push_back(std::move(f));
+                        } else {
+                            remap[i]=-1;
+                            if(!f.deleted && FAILED(f.error)) result->issues.push_back({f.fullPath,f.error});
+                        }
+                    }
+                    for(auto& group:result->groups) {
+                        for(int& idx:group.fileIndices) idx=remap[idx];
+                        std::erase_if(group.fileIndices,[](int idx) { return idx<0; });
+                    }
+                    std::erase_if(result->groups,[](const VideoGroup& g) { return g.fileIndices.size()<2; });
+                    result->files=std::move(kept);
+                }
+            }
             }
             result->cancelled=cancel_.load();
             if(!result->cancelled && !restoredManual && !result->restored) QFile::remove(cachePath+".scan-job");
@@ -150,17 +247,19 @@ void MainWindow::receiveScan(std::shared_ptr<ScanResult> result,uint64_t generat
     if(generation!=generation_) return;
     if(scanThread_.joinable()) scanThread_.join();
     scanning_=false; foldersAction_->setEnabled(true); rescanAction_->setEnabled(true); stopAction_->setEnabled(false); profile_->setEnabled(true); if(similarityThreshold_) similarityThreshold_->setEnabled(true); sort_->setEnabled(true); results_->setEnabled(true); progress_->hide();
-    pauseAction_->setEnabled(false); resumeAction_->setEnabled(pausedScan_); updateEmptyState();
+    scanPausable_=false; pauseAction_->setEnabled(false);
+    if(folders_.empty() && !QFileInfo::exists(cachePath_+".scan-job")) pausedScan_=false;
+    resumeAction_->setEnabled(pausedScan_); updateEmptyState();
     if(pendingClose_) { if(!result->restored) finishScanTiming(result->cancelled?(pausedScan_?"paused":"stopped"):result->error.isEmpty()?"completed":"failed"); close(); return; }
     cacheHits_=result->cacheHits; cacheError_=result->cacheError; scanMetrics_=result->metrics;
     if(result->cancelled) { if(!result->restored) finishScanTiming(pausedScan_?"paused":"stopped"); if(currentGroup_>=0) selectGroup(currentGroup_); statusBar()->showMessage(text(pausedScan_?"Scan paused; completed reads are saved.":"Scan stopped")); saveSettings(); return; }
     if(!result->error.isEmpty()) { finishScanTiming("failed"); QMessageBox::warning(this,text("Scan report"),text(result->error.toUtf8().constData())); return; }
-    manual_=result->manual; markedFiles_.clear(); files_=std::move(result->files); groups_=std::move(result->groups); scanIssues_=std::move(result->issues); currentGroup_=-1;
+    manual_=result->manual; markedFiles_.clear(); files_=std::move(result->files); groups_=std::move(result->groups); scanIssues_=std::move(result->issues); scanCriteria_.ignoredPairs=std::move(result->ignoredPairs); currentGroup_=-1;
     savedResultEvidence_=result->restored;
     if(!result->restored) applyReferenceRule();
     for(int i=0;i<int(files_.size());++i) if(!files_[i].deleted) {
-        const auto key=ReviewPairKey(files_[i].identity,files_[i].identity);
-        if(restoreMarks_.contains(key.substr(0,key.find('/')))) markedFiles_.insert(i);
+        if(restoreMarks_.contains(FileReviewId(files_[i])) || restoreMarks_.contains(FileReviewId(files_[i].identity)))
+            markedFiles_.insert(i);
     }
     restoreMarks_.clear();
     if(!restoreRightCandidates_.empty()) {
@@ -204,7 +303,7 @@ void MainWindow::receiveScan(std::shared_ptr<ScanResult> result,uint64_t generat
     if(result->restored) {
         settings_.setValue("scanInProgress",false); saveSettings(); updateScanTimeLabel();
         statusBar()->showMessage(text("Saved results opened · %1 changed or missing files excluded").arg(result->changedFiles));
-    } else finishScanTiming("completed");
+    } else { finishScanTiming("completed"); if(groups_.empty()) updateEmptyState(); }
     if(!result->restored && !manual_ && !saveScanReportFile(QFileInfo(settings_.fileName()).dir().filePath("last-scan-report.txt"),scanReportText()))
         statusBar()->showMessage(text("The scan report could not be saved."));
 }
@@ -239,14 +338,21 @@ QString MainWindow::scanReportText() const {
     for(const auto& file:files_) if(FAILED(file.error)) addError(file.fullPath,file.error);
     for(const auto& issue:scanIssues_) addError(issue.path,issue.error);
     QString summary=QDateTime::currentDateTime().toString(Qt::ISODate)+"\n";
-    summary+=text("%1 files · %2 read errors").arg(files_.size()).arg(errors.size())+"\n";
+    const size_t totalFiles=scanMetrics_.compactedFiles && scanMetrics_.discoveredFiles>0?scanMetrics_.discoveredFiles:files_.size();
+    summary+=text("%1 files · %2 read errors").arg(totalFiles).arg(errors.size())+"\n";
     // Files that cannot have a match are left out before reading; the report says so, so they are not taken for failures.
     if(!manual_) {
-        size_t outsideLimits=0,uniqueSize=0; std::map<uint64_t,unsigned> sizes;
-        for(const auto& file:files_) {
-            if(file.fileSize<scanCriteria_.minFileSize || file.fileSize>scanCriteria_.maxFileSize) ++outsideLimits; else ++sizes[file.fileSize];
+        size_t outsideLimits=0,uniqueSize=0;
+        if(scanMetrics_.compactedFiles) {
+            outsideLimits=scanMetrics_.outsideSizeLimits;
+            uniqueSize=scanMetrics_.skippedUniqueSize;
+        } else {
+            std::map<uint64_t,unsigned> sizes;
+            for(const auto& file:files_) {
+                if(file.fileSize<scanCriteria_.minFileSize || file.fileSize>scanCriteria_.maxFileSize) ++outsideLimits; else ++sizes[file.fileSize];
+            }
+            if(scanCriteria_.matchContent || scanCriteria_.matchSize) for(const auto& [size,count]:sizes) if(count==1) ++uniqueSize;
         }
-        if(scanCriteria_.matchContent || scanCriteria_.matchSize) for(const auto& [size,count]:sizes) if(count==1) ++uniqueSize;
         if(outsideLimits) summary+=text("Not compared: %1 files outside the size limits in Scan rules.").arg(outsideLimits)+"\n";
         if(uniqueSize) summary+=text("Not compared: %1 files with a size no other file has; they cannot have an exact copy.").arg(uniqueSize)+"\n";
     }
@@ -254,8 +360,15 @@ QString MainWindow::scanReportText() const {
     summary+=(groups_.size()==1?text("1 group · %1 files").arg(fileCount):text("%1 groups · %2 files").arg(groups_.size()).arg(fileCount))+"\n";
     for(auto it=byType.cbegin();it!=byType.cend();++it) summary+=it.key()+": "+QString::number(it.value())+"\n";
     summary+="\n";
-    if(scanCriteria_.matchVisualSamples) for(const auto& file:files_) if(!file.deleted && !file.corrupted && file.samples.size()==5 && std::count_if(file.samples.begin(),file.samples.end(),[](const auto& sample) { return sample.valid; })<3)
-        errors<<QString::fromStdWString(file.fullPath)+"\n"+text("The picture hardly changes (a still image or slides), so it was not compared visually, to avoid false matches. The \"Exact copies\" mode still finds its exact copies.");
+    if(scanCriteria_.matchVisualSamples) {
+        const auto lowVarNote=text("The picture hardly changes (a still image or slides), so it was not compared visually, to avoid false matches. The \"Exact copies\" mode still finds its exact copies.");
+        if(scanMetrics_.compactedFiles && !scanMetrics_.lowVarianceSkipped.empty()) {
+            for(const auto& p:scanMetrics_.lowVarianceSkipped) errors<<QString::fromStdWString(p)+"\n"+lowVarNote;
+        } else {
+            for(const auto& file:files_) if(!file.deleted && !file.corrupted && file.samples.size()==5 && std::count_if(file.samples.begin(),file.samples.end(),[](const auto& sample) { return sample.valid; })<3)
+                errors<<QString::fromStdWString(file.fullPath)+"\n"+lowVarNote;
+        }
+    }
     if(!cacheError_.isEmpty()) errors<<text("Cache unavailable; scanning still works.")+"\n"+cacheError_;
     if(scanCriteria_.matchVisualSamples && !manual_) {
         summary+=text("Compared visually: %1 of %2 videos. Not compared: %3 videos with no other video of a similar length; they cannot have a similar copy.").arg(scanMetrics_.sampleCandidates).arg(scanMetrics_.inputCandidates).arg(scanMetrics_.durationRejected)+"\n";

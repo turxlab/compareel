@@ -31,6 +31,7 @@
 #include <QPushButton>
 #include <QSignalBlocker>
 #include <QStatusBar>
+#include <QTimeZone>
 #include <QUrl>
 #include <QVBoxLayout>
 #include <QtConcurrent/QtConcurrentRun>
@@ -179,7 +180,7 @@ void MainWindow::showSettings() {
 
 void MainWindow::advancedSettings() {
     if(scanning_ || fileOperationPending_ || closing_) return;
-    ScanRulesDialog dialog(options_,profile_->currentIndex()==2,this);
+    ScanRulesDialog dialog(options_,profile_->currentIndex(),this);
     if(dialog.exec()!=QDialog::Accepted) return;
     if(!dialog.applyTo(options_,this)) return;
     if(similarityThreshold_) { QSignalBlocker b(similarityThreshold_); similarityThreshold_->setValue(static_cast<int>(std::lround(options_.minFrameSimilarity))); }
@@ -230,7 +231,7 @@ void MainWindow::showClearHistory() {
     }
     saveSettings(); settings_.sync(); updateEmptyState();
     if(failures.isEmpty()) statusBar()->showMessage(text("History cleared."));
-    else QMessageBox::warning(this,text("Clear history…"),text("Some items could not be removed:")+"\n\n"+failures.join("\n"));
+    else plainWarning(this,text("Clear history…"),text("Some items could not be removed:")+"\n\n"+failures.join("\n"));
 }
 
 void MainWindow::showFileDetails(PlayerPanel* panel) {
@@ -251,30 +252,57 @@ void MainWindow::showFileDetails(PlayerPanel* panel) {
     const bool image=StillImages::supported(file.fullPath);
     auto durationField=row("Duration",{},"detailDuration"),resolutionField=row("Resolution",{},"detailResolution"),codecField=row(image?"Image format":"Video codec",{});
     auto fpsField=row("Frame rate",{},"detailFps"),bitrateField=row("Video bitrate",{}),audioField=row("Audio",{});
+    auto dateTakenField=row("Date taken",{},"detailDateTaken");
     if(image) for(auto field:{durationField,fpsField,bitrateField,audioField}) form->setRowVisible(field,false);
+    else form->setRowVisible(dateTakenField,false);
     auto refreshMetadata=[=](const VideoFileInfo& info) {
         const auto unknown=text(info.metadataLoaded?"Not available":"Inspecting…");
+        const auto unknownDate=text((info.metadataLoaded && info.cachedDetailsVersion>=2)?"Not available":"Inspecting…");
         durationField->setText(info.duration100ns>0?duration(info.duration100ns):unknown);
         resolutionField->setText(info.width && info.height?QString("%1 × %2").arg(info.width).arg(info.height):unknown);
         codecField->setText(info.codec.empty()?unknown:QString::fromStdWString(info.codec));
         fpsField->setText(info.fps>0?QString("%1 FPS").arg(info.fps,0,'f',3):unknown);
         bitrateField->setText(info.videoBitrate?QString("%1 kb/s").arg(info.videoBitrate/1000.0,0,'f',1):unknown);
         audioField->setText(info.audioChannels<0?unknown:info.audioChannels==0?text("No audio track"):QString("%1 · %2 ch · %3 Hz").arg(QString::fromStdWString(info.audioCodec)).arg(info.audioChannels).arg(info.audioSampleRate));
+        if(image) dateTakenField->setText(info.captureTimeSec>0?QDateTime::fromSecsSinceEpoch(info.captureTimeSec,QTimeZone::UTC).toString("yyyy-MM-dd HH:mm:ss"):unknownDate);
     };
     refreshMetadata(file);
-    if(!file.metadataLoaded) {
+    if(!file.metadataLoaded || (image && file.cachedDetailsVersion<2)) {
+        const QString cachePath=cachePath_;
         auto watcher=new QFutureWatcher<VideoFileInfo>(&dialog);
-        connect(watcher,&QFutureWatcher<VideoFileInfo>::finished,&dialog,[watcher,refreshMetadata] { refreshMetadata(watcher->result()); watcher->deleteLater(); });
-        watcher->setFuture(QtConcurrent::run([file,cancelled] {
-            VideoFileInfo result; result.fullPath=file.fullPath; result.identity=file.identity; result.metadataLoaded=true;
+        connect(watcher,&QFutureWatcher<VideoFileInfo>::finished,&dialog,[this,panel,file,watcher,refreshMetadata] {
+            const auto res=watcher->result();
+            if(panel && panel->fileIndex>=0 && panel->fileIndex<int(files_.size()) &&
+               files_[panel->fileIndex].identity==file.identity && files_[panel->fileIndex].fullPath==file.fullPath &&
+               res.metadataLoaded && !res.corrupted && !res.previewFailed && SUCCEEDED(res.error)) {
+                auto& dst=files_[panel->fileIndex];
+                dst.width=res.width; dst.height=res.height; dst.duration100ns=res.duration100ns;
+                dst.fps=res.fps; dst.videoBitrate=res.videoBitrate; dst.audioChannels=res.audioChannels;
+                dst.audioSampleRate=res.audioSampleRate; dst.audioCodec=res.audioCodec; dst.codec=res.codec;
+                dst.captureTimeSec=res.captureTimeSec;
+                dst.imageKind=res.imageKind; dst.imageFrameCount=res.imageFrameCount;
+                dst.cachedDetailsVersion=res.cachedDetailsVersion; dst.cachedImageRenderVersion=res.cachedImageRenderVersion; dst.metadataLoaded=true;
+                panel->setFile(&dst,panel->fileIndex); updatePeers();
+            }
+            refreshMetadata(res);
+            watcher->deleteLater();
+        });
+        watcher->setFuture(QtConcurrent::run([file,cancelled,cachePath] {
+            VideoFileInfo result=file;
             Platform::ComInit com(Platform::ComApartment::MultiThreaded);
-            if(cancelled->load()) result.error=E_ABORT;
-            else if(!com.succeeded()) result.error=com.hr();
-            else if(!file.identity.valid || FileOperations::ReadIdentity(file.fullPath)!=file.identity) result.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+            if(cancelled->load()) { result.metadataLoaded=true; result.cachedDetailsVersion=2; result.error=E_ABORT; }
+            else if(!com.succeeded()) { result.metadataLoaded=true; result.cachedDetailsVersion=2; result.error=com.hr(); }
+            else if(!file.identity.valid || FileOperations::ReadIdentity(file.fullPath)!=file.identity) { result={}; result.metadataLoaded=true; result.cachedDetailsVersion=2; result.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID); }
             else {
-                result.metadataLoaded=false;
-                if(StillImages::supported(result.fullPath)) StillImages::analyze(result,*cancelled); else VideoScanner::ExtractMetadataOnly(result);
-                if(FileOperations::ReadIdentity(file.fullPath)!=file.identity) { result={}; result.metadataLoaded=true; result.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID); }
+                if(StillImages::supported(result.fullPath)) {
+                    if((result.frameLoaded || result.metadataLoaded) && result.width>0 && result.height>0 && result.cachedDetailsVersion<2) StillImages::refreshCaptureTime(result,*cancelled);
+                    else StillImages::analyze(result,*cancelled);
+                } else {
+                    result.metadataLoaded=false;
+                    VideoScanner::ExtractMetadataOnly(result);
+                }
+                if(FileOperations::ReadIdentity(file.fullPath)!=file.identity) { result={}; result.metadataLoaded=true; result.cachedDetailsVersion=2; result.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID); }
+                else if(result.metadataLoaded && !cancelled->load() && !cachePath.isEmpty()) { ScanCache cache(cachePath); cache.store({result}); }
             }
             return result;
         }));
@@ -288,16 +316,29 @@ void MainWindow::showFileDetails(PlayerPanel* panel) {
             const auto result=watcher->result(); watcher->deleteLater();
             if(result.status!=SubtitleInfo::Complete) {
                 subtitles->setText(result.status==SubtitleInfo::Changed?text("File changed; inspect again"):text("Not inspected"));
+                subtitles->setProperty("richToolTip",false);
                 subtitles->setToolTip(text("Media inspection did not finish successfully.")); return;
             }
             auto summary=result.tracks.empty()?text("No embedded subtitles reported"):text("%1 embedded track(s)").arg(result.tracks.size());
             if(result.tracks.size()==1) summary+=" · "+result.tracks.front();
             subtitles->setText(summary);
-            if(!result.tracks.empty()) subtitles->setToolTip("<pre>"+(result.tracks.mid(0,8).join('\n')+(result.tracks.size()>8?"\n…":QString())).toHtmlEscaped()+"</pre>");
+            if(!result.tracks.empty()) {
+                subtitles->setProperty("richToolTip",true);
+                subtitles->setToolTip("<pre>"+(result.tracks.mid(0,8).join('\n')+(result.tracks.size()>8?"\n…":QString())).toHtmlEscaped()+"</pre>");
+            }
         });
         watcher->setFuture(QtConcurrent::run([path=QString::fromStdWString(file.fullPath),identity=file.identity,cancelled] { return inspectSubtitles(path,identity,*cancelled); }));
     }
-    row("Modified",file.identity.valid?QDateTime::fromMSecsSinceEpoch(qint64(file.identity.modified/10000)-11644473600000LL).toLocalTime().toString("yyyy-MM-dd HH:mm:ss"):text("Not available"));
+    if(file.createdTime==0 && file.identity.valid) {
+        file.createdTime=Platform::ReadFileCreationTime(file.fullPath);
+        if(panel->fileIndex>=0 && panel->fileIndex<int(files_.size()) && files_[panel->fileIndex].identity==file.identity)
+            files_[panel->fileIndex].createdTime=file.createdTime;
+    }
+    auto formatFileTime=[&](uint64_t ft) {
+        return ft>116444736000000000ULL?QDateTime::fromMSecsSinceEpoch(qint64(ft/10000)-11644473600000LL).toLocalTime().toString("yyyy-MM-dd HH:mm:ss"):text("Not available");
+    };
+    row("Created",file.identity.valid?formatFileTime(file.createdTime):text("Not available"),"detailCreated");
+    row("Modified",file.identity.valid?formatFileTime(file.identity.modified):text("Not available"));
     row("Quality",text("File size, bitrate and resolution alone do not determine quality."));
     auto close=new QDialogButtonBox(QDialogButtonBox::Close,&dialog); close->button(QDialogButtonBox::Close)->setText(text("Close")); connect(close,&QDialogButtonBox::rejected,&dialog,&QDialog::reject); layout->addWidget(close); dialog.exec();
 }

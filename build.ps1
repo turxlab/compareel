@@ -1,4 +1,4 @@
-param([switch]$Package, [string]$Version = '1.0.0', [string]$BuildDirectory = '.build')
+param([switch]$Package, [string]$Version = '1.1.0', [string]$BuildDirectory = '.build')
 $ErrorActionPreference = 'Stop'
 $projectRoot = $PSScriptRoot
 if ($Version -notmatch '^\d+\.\d+\.\d+([-.][A-Za-z0-9.-]+)?$') { throw 'Invalid version.' }
@@ -55,9 +55,19 @@ try {
     # published next to the packages, as HandBrake does with its source tarball.
     $licenseSections = [Collections.Generic.List[string]]::new()
     $licenseFiles = @(Get-ChildItem -LiteralPath (Join-Path $projectRoot 'third_party\qt-6.8.3\LICENSES') -File | Sort-Object Name | ForEach-Object { @("Qt 6.8.3 - $($_.BaseName)", $_.FullName) }) +
-        @('FFmpeg - LGPL-3.0', (Join-Path $projectRoot 'third_party\ffmpeg\COPYING.LGPLv3'),
+        @('QtSvg 6.8.3 - XSVG', (Join-Path $projectRoot 'third_party\qt-6.8.3\qtsvg\XSVG_LICENSE.txt'),
+          'Qt Image Formats 6.8.3 - libtiff', (Join-Path $projectRoot 'third_party\qt-6.8.3\qtimageformats\LICENSES\libtiff.txt'),
+          'Qt Image Formats 6.8.3 - libwebp', (Join-Path $projectRoot 'third_party\qt-6.8.3\qtimageformats\src\3rdparty\libwebp\COPYING'),
+          'Qt Image Formats 6.8.3 - libwebp PATENTS', (Join-Path $projectRoot 'third_party\qt-6.8.3\qtimageformats\src\3rdparty\libwebp\PATENTS'),
+          'FFmpeg - LGPL-3.0', (Join-Path $projectRoot 'third_party\ffmpeg\COPYING.LGPLv3'),
           'libheif 1.23.7 - LGPL-3.0', (Join-Path $projectRoot 'third_party\libheif-1.23.7\COPYING'),
-          'Lucide icons - ISC', (Join-Path $projectRoot 'third_party\lucide\LICENSE'))
+          'Lucide icons - ISC', (Join-Path $projectRoot 'third_party\lucide\LICENSE'),
+          'dav1d - BSD-2-Clause', (Join-Path $projectRoot 'third_party\ffmpeg\licenses\dav1d-COPYING'),
+          'zimg - WTFPL', (Join-Path $projectRoot 'third_party\ffmpeg\licenses\zimg-COPYING'),
+          'libjxl - BSD-3-Clause', (Join-Path $projectRoot 'third_party\ffmpeg\licenses\libjxl-LICENSE'),
+          'Highway - Apache-2.0 or BSD-3-Clause', (Join-Path $projectRoot 'third_party\ffmpeg\licenses\Highway-LICENSE-BSD3'),
+          'Brotli - MIT', (Join-Path $projectRoot 'third_party\ffmpeg\licenses\Brotli-LICENSE'),
+          'XZ Utils liblzma - 0BSD', (Join-Path $projectRoot 'third_party\ffmpeg\licenses\liblzma-COPYING.0BSD'))
     for ($i = 0; $i -lt $licenseFiles.Count; $i += 2) {
         $licenseSections.Add(('=' * 78) + "`r`n" + $licenseFiles[$i] + "`r`n" + ('=' * 78) + "`r`n`r`n" + (Get-Content -LiteralPath $licenseFiles[$i + 1] -Raw).TrimEnd())
     }

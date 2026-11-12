@@ -311,7 +311,7 @@ bool MainWindow::runMatchingCheck(const QString& mediaPath,const QString& screen
        !rejectSession([](auto& o) { auto a=o["files"].toArray(); auto row=a[1].toObject(); row["identity"]=a[0].toObject()["identity"]; a[1]=row; o["files"]=a; }) ||
        !rejectSession([](auto& o) { auto c=o["criteria"].toObject(); c["threshold"]=101; o["criteria"]=c; }) ||
        !rejectSession([](auto& o) { auto c=o["criteria"].toObject(); c["tolerance"]="-1"; o["criteria"]=c; }) ||
-       !rejectSession([](auto& o) { auto v=o["view"].toObject(); v["offset"]=3601; o["view"]=v; }) ||
+       !rejectSession([](auto& o) { auto v=o["view"].toObject(); v["offset"]=86401; o["view"]=v; }) ||
        !rejectSession([](auto& o) { o["ignoredPairs"]=QJsonArray{"unknown/identity"}; })) return fail("invalid session must preserve current review");
     {
         auto huge=fixture.filePath("oversized.cvsession"); QFile out(huge);

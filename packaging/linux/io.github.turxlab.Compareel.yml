@@ -84,9 +84,9 @@ modules:
 
   - name: compareel
     buildsystem: cmake-ninja
-    config-opts: [-DCMAKE_BUILD_TYPE=Release]
+    config-opts: [-DCMAKE_BUILD_TYPE=Release, -DCOMPAREEL_DISPLAY_VERSION=1.1.0]
     sources:
       - type: dir
         path: ../..
         # Local SDKs, build output and notes are not part of the source.
-        skip: [.deps, .build, .build-ui, release, docs, build-mac, .git]
+        skip: [.deps, .build, .build-ui, release, docs, build-mac, .git, .flatpak-manifest.yml]

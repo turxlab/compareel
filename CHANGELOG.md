@@ -4,6 +4,42 @@ All notable changes to Compareel are documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-11-12
+
+### Added
+
+- **Sort groups** by **Highest similarity** or **Lowest similarity**; group headers show the measured similarity of each group.
+- **Oldest creation date** and, for images, **Oldest date taken (EXIF)** as **Keep in each group** and cleanup keep rules.
+- **File details** show the creation and modification dates; image comparisons show the EXIF date taken.
+- Minimum and maximum file size with selectable units in **Tools > Scan rules…**; the rules shown follow the selected mode.
+- Page counter for multi-page images in the player.
+- Tone mapping for half-float OpenEXR and float grayscale-with-alpha images.
+- `.ilbm` files are found by scans and offered in **Open two files…**.
+
+### Changed
+
+- Faster visual grouping for large image and video collections.
+- Folder scans are no longer limited to 100,000 files. Above that size, pausing and automatic review saving are turned off, and the app says so.
+- Camera RAW files report their full sensor resolution, so **Highest resolution** keeps the RAW file over a smaller JPEG copy. Embedded preview selection for RAW, DNG and CR3 files is more reliable.
+- **View > Privacy mode** is now **View > Hide all previews**; the toolbar button is labelled **Hide**.
+- A failed preview is reported separately from SHA-256 verification.
+- The Windows `licenses.txt` now includes the licenses of every statically linked library.
+
+### Fixed
+
+- Pairs ignored in an earlier session could reappear when a group was regrouped.
+- Sorting by similarity could change which file became the group reference.
+- **Pause scan** could become enabled again for scans that cannot be paused.
+- The alignment **Offset** was limited to one hour; partial clips up to 24 hours can now be aligned.
+- **Previous group** and **Next group** now skip groups hidden by the filter.
+- The cleanup mark preview could propose files that the cleanup plan then left out.
+- "No files to compare" could appear after a scan that found files but no matches.
+- File paths in message boxes are always shown as plain text.
+- Lower memory use for long animations; fixes for some DDS files.
+- Opening previews no longer rewrites unchanged cache entries.
+- The Linux Flatpak shows the correct version in **About**.
+- The libheif rebuild scripts under `third_party/` point to the shipped FFmpeg build.
+
 ## [1.0.0] - 2026-11-04
 
 First public release.
@@ -32,4 +68,5 @@ First public release.
   - Optional Windows Explorer **Send To** shortcut and optional GitHub release check (**Help > Check for updates…**).
   - Packages for Windows 10/11 x64 (installer and portable zip), macOS 12+ (universal `.dmg`) and Linux x86_64 (Flatpak `io.github.turxlab.Compareel`), with corresponding source archive.
 
+[1.1.0]: https://github.com/turxlab/compareel/releases/tag/v1.1.0
 [1.0.0]: https://github.com/turxlab/compareel/releases/tag/v1.0.0

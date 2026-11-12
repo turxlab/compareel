@@ -5,6 +5,7 @@
 #include "Icons.h"
 #include "Theme.h"
 #include "FileOperations.h"
+#include "platform/Platform.h"
 #include "ScanCache.h"
 #include "ImageReader.h"
 #include "FFmpegReader.h"
@@ -68,7 +69,7 @@ MainWindow::MainWindow(const QString& dataDirectory,QWidget* parent) :
     options_.matchSize=settings_.value("matchSize",true).toBool(); options_.matchDuration=settings_.value("matchDuration",false).toBool();
     options_.matchResolution=settings_.value("matchResolution",false).toBool(); options_.matchFirstFrame=settings_.value("matchFirstFrame",false).toBool();
     options_.matchFileName=settings_.value("matchFileName",false).toBool(); options_.matchExtension=settings_.value("matchExtension",false).toBool();
-    options_.sortOrder=static_cast<SortOrder>(std::clamp(settings_.value("sort",0).toInt(),0,6));
+    options_.sortOrder=static_cast<SortOrder>(std::clamp(settings_.value("sort",0).toInt(),0,8));
     previewPool_.setMaxThreadCount(2); cachePath_=QFileInfo(settings_.fileName()).dir().filePath("scan-cache-v1.sqlite");
     cleanupReviewPath_=QFileInfo(settings_.fileName()).dir().filePath("last-cleanup.cvsession");
     lastReviewPath_=QFileInfo(settings_.fileName()).dir().filePath("last-review.cvsession");
@@ -172,7 +173,7 @@ void MainWindow::tick() {
     }
     updateReviewState();
     if(scanning_) updateScanTimeLabel();
-    pauseAction_->setEnabled(scanning_); resumeAction_->setEnabled(pausedScan_ && !scanning_);
+    pauseAction_->setEnabled(scanning_ && scanPausable_ && !cancel_.load()); resumeAction_->setEnabled(pausedScan_ && !scanning_);
     left_->refresh(); right_->refresh();
     bool alignmentAvailable=!scanning_ && !fileOperationPending_ && left_->player->IsLoaded() && right_->player->IsLoaded();
     offset_->parentWidget()->setEnabled(alignmentAvailable);
@@ -345,7 +346,7 @@ void MainWindow::autoAlignPartialClip() {
 
 void MainWindow::openTwoFiles() {
     if(scanning_) return;
-    QString filter="Media (*.mp4 *.mkv *.mov *.avi *.webm *.wmv *.m4v *.flv *.mpg *.mpeg *.ts *.mts *.m2ts *.3gp *.vob *.ogv *.divx *.asf *.jpg *.jpeg *.jpe *.jfif *.png *.apng *.webp *.heic *.heif *.hif *.avif *.avifs *.bmp *.dib *.gif *.tif *.tiff *.tga *.icb *.vda *.vst *.ico *.cur *.icns *.pbm *.pgm *.ppm *.pnm *.pam *.pfm *.phm *.xbm *.xpm *.wbmp *.svg *.svgz *.psd *.psb *.jxl *.jp2 *.j2k *.jpc *.jpf *.jpx *.j2c *.jls *.jxr *.wdp *.hdp *.exr *.hdr *.pic *.dds *.pcx *.qoi *.sgi *.rgb *.rgba *.bw *.int *.inta *.ras *.sun *.dpx *.iff *.ilbm *.lbm *.dng *.cr2 *.cr3 *.nef *.nrw *.arw *.srf *.sr2 *.raf *.orf *.rw2 *.pef *.srw *.x3f *.3fr *.fff *.iiq *.erf *.kdc *.dcr *.mrw *.mos *.raw *.rwl);;All files (*)";
+    QString filter="Media (*.mp4 *.mkv *.mov *.avi *.webm *.wmv *.m4v *.flv *.mpg *.mpeg *.ts *.mts *.m2ts *.3gp *.vob *.ogv *.divx *.asf *.jpg *.jpeg *.jpe *.jfif *.png *.apng *.webp *.heic *.heif *.hif *.avif *.avifs *.bmp *.dib *.gif *.tif *.tiff *.tga *.icb *.vda *.vst *.ico *.cur *.icns *.pbm *.pgm *.ppm *.pnm *.pam *.pfm *.phm *.xbm *.xpm *.wbmp *.svg *.svgz *.psd *.psb *.jxl *.jp2 *.j2k *.jpc *.jpf *.jpx *.j2c *.jls *.jxr *.wdp *.hdp *.exr *.hdr *.pic *.dds *.pcx *.qoi *.sgi *.rgb *.rgba *.bw *.ras *.sun *.dpx *.iff *.ilbm *.lbm *.dng *.cr2 *.cr3 *.nef *.nrw *.arw *.srf *.sr2 *.raf *.orf *.rw2 *.pef *.srw *.erf *.kdc *.dcr *.3fr *.mef *.mos *.iiq *.raw);;All files (*)";
 #ifndef _WIN32
     filter.remove(" *.jxr *.wdp *.hdp"); // JPEG XR is decoded only by Windows' WIC
 #endif
@@ -361,11 +362,12 @@ void MainWindow::openFiles(const QStringList& selection) {
     ++generation_; pendingPreviews_.clear(); previewRuns_.clear(); requestedSamples_.clear(); markedFiles_.clear(); files_.clear(); groups_.clear(); manual_=true; currentGroup_=-1;
     for(auto path:selection) {
         VideoFileInfo file; QFileInfo info(path); file.fullPath=QDir::toNativeSeparators(path).toStdWString(); file.fileName=info.fileName().toStdWString(); file.folderPath=QDir::toNativeSeparators(info.absolutePath()).toStdWString(); file.fileSize=info.size(); file.identity=FileOperations::ReadIdentity(file.fullPath);
+        if(file.identity.valid) file.createdTime=Platform::ReadFileCreationTime(file.fullPath);
         for(const auto& root:options_.protectedFolders)
             if(VideoScanner::IsWithinFolder(file.fullPath,root)) file.protectedFile=file.protectedByFolder=true;
         files_.push_back(std::move(file));
     }
-    if(files_[0].identity.valid && files_[0].identity==files_[1].identity) {
+    if(SamePhysicalFile(files_[0],files_[1])) {
         files_.clear(); left_->setFile(nullptr,-1); right_->setFile(nullptr,-1); populateResults();
         QMessageBox::information(this,text("Open two files…"),text("Choose two different physical files.")); return;
     }
@@ -387,7 +389,7 @@ void MainWindow::saveSettings() {
 }
 void MainWindow::closeEvent(QCloseEvent* event) {
     if(fileOperationPending_) { bulkCancel_.store(true); pendingClose_=true; event->ignore(); statusBar()->showMessage(text("Stopping…")); return; }
-    if(scanning_) { pendingClose_=true; pausedScan_=true; cancel_.store(true); saveSettings(); statusBar()->showMessage(text("Stopping…")); event->ignore(); return; }
+    if(scanning_) { pendingClose_=true; if(scanPausable_ && !cancel_.load()) pausedScan_=true; cancel_.store(true); saveSettings(); statusBar()->showMessage(text("Stopping…")); event->ignore(); return; }
     if(sortingMetadata_) { cancel_.store(true); pendingClose_=true; event->ignore(); statusBar()->showMessage(text("Stopping…")); return; }
     if(clearingCache_) { pendingClose_=true; event->ignore(); statusBar()->showMessage(text("Stopping…")); return; }
     if(closeReady_) { saveSettings(); event->accept(); return; }
@@ -477,9 +479,8 @@ bool MainWindow::eventFilter(QObject* object,QEvent* event) {
             int group=currentGroup_,slot=groups_[group].rightSlot; bool handled=true;
             switch(key->key()) {
             case Qt::Key_Up: case Qt::Key_Down: {
-                int step=key->key()==Qt::Key_Up?-1:1, next=group+step;
-                while(next>=0 && next<static_cast<int>(groups_.size()) && results_->topLevelItem(next)->isHidden()) next+=step;
-                if(next>=0 && next<static_cast<int>(groups_.size())) { group=next; slot=groups_[group].rightSlot; }
+                const int next=adjacentVisibleGroup(group,key->key()==Qt::Key_Up?-1:1);
+                if(next>=0) { group=next; slot=groups_[group].rightSlot; }
                 break;
             }
             case Qt::Key_Left: slot=std::max(1,slot-1); break;

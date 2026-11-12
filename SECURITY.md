@@ -42,4 +42,4 @@ Bugs inside unmodified upstream libraries (FFmpeg, libheif, Qt, dav1d, libjxl, z
 
 ### Local data
 
-As noted in **Help > Data and privacy**, the local scan cache, saved `.cvsession` files, operation history and quarantine copies are stored unencrypted under the user's account. **View > Privacy mode** hides previews on screen only; protecting local disk data from other users with access to the same account or disk is outside Compareel's scope.
+As noted in **Help > Data and privacy**, the local scan cache, saved `.cvsession` files, operation history and quarantine copies are stored unencrypted under the user's account. **View > Hide all previews** hides previews on screen only; protecting local disk data from other users with access to the same account or disk is outside Compareel's scope.

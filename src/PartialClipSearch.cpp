@@ -12,6 +12,15 @@ Result Find(const std::vector<std::wstring>& folders,ScanCriteria criteria,std::
     Result result; criteria.images=false;
     std::vector<ScanIssue> issues;
     auto discovered=VideoScanner::DiscoverVideos(folders,criteria.includeSubfolders,cancel,progress,&criteria,&issues);
+    const auto& roots=criteria.comparisonRoots.empty()?folders:criteria.comparisonRoots;
+    for(auto& d:discovered) {
+        d.comparisonRoot=-1; size_t longest=0;
+        for(size_t r=0;r<roots.size();++r) {
+            if(roots[r].size()>longest && VideoScanner::IsWithinFolder(d.fullPath,roots[r])) {
+                longest=roots[r].size(); d.comparisonRoot=static_cast<int>(r);
+            }
+        }
+    }
     result.failed=unsigned(issues.size());
     struct Point { uint32_t file,sample; };
     std::unordered_map<unsigned,std::vector<Point>> index;
@@ -56,10 +65,11 @@ Result Find(const std::vector<std::wstring>& folders,ScanCriteria criteria,std::
         for(const auto& [key,count]:votes) {
             if(cancel.load()) break;
             if(count<6) continue;
-            if(result.files[key.first].identity==file.identity) continue;
-            if(criteria.ignoredPairs.contains(ReviewPairKey(result.files[key.first].identity,file.identity))) continue;
+            if(SamePhysicalFile(result.files[key.first],file)) continue;
+            if(criteria.ignoredPairs.contains(ReviewPairKey(result.files[key.first],file)) ||
+               criteria.ignoredPairs.contains(ReviewPairKey(result.files[key.first].identity,file.identity))) continue;
             const auto& before=timelines[key.first];
-            if(criteria.crossFolderOnly && result.files[key.first].comparisonRoot==file.comparisonRoot) continue;
+            if(criteria.crossFolderOnly && (result.files[key.first].comparisonRoot<0 || file.comparisonRoot<0 || result.files[key.first].comparisonRoot==file.comparisonRoot)) continue;
             Run best,current; double sum=0;
             auto commit=[&] { if(current.count>=6 && current.count>best.count) { current.match.similarity=sum/current.count; best=current; } current={}; sum=0; };
             size_t right=0;

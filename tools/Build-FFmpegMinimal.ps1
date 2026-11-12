@@ -3,7 +3,7 @@
 # come from BtbN's win64-lgpl-8.1 image (the recipe behind the full LGPL build); the FFmpeg source is the pinned tarball in third_party.
 # The full SDK in .deps/ffmpeg-8.1 stays: its ffmpeg.exe encodes the fixtures used by the self-checks.
 # Pinned by digest so a rebuild uses the same compiler and library versions as the shipped DLLs.
-param([string]$Image = 'ghcr.io/btbn/ffmpeg-builds/win64-lgpl-8.1@sha256:cba7a58bfca46a17ca41400d462580c8e364dbf27da7b15c0eb1fb607054f74a')
+param([string]$Image = 'ghcr.io/btbn/ffmpeg-builds/win64-lgpl-8.1@sha256:3b58d55fe69e8ea35951dbacffc86f5e396b58cf530e205e7536e00f065cb872')
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $work = Join-Path $root '.deps/ffmpeg-min-build'

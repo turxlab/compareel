@@ -209,16 +209,39 @@ int CompareFileNamesNatural(const std::wstring& a, const std::wstring& b) {
     return 0;
 }
 
-bool StatRegularFile(const std::wstring& path, uint64_t& outSize, uint64_t& outLastWriteTime) {
+bool StatRegularFile(const std::wstring& path, uint64_t& outSize, uint64_t& outLastWriteTime, uint64_t* outCreatedTime) {
     struct stat st{};
     if (stat(ToUtf8(path).c_str(), &st) != 0 || S_ISDIR(st.st_mode)) return false;
     outSize = static_cast<uint64_t>(st.st_size);
 #ifdef __APPLE__
     outLastWriteTime = FileTimeFromTimespec(st.st_mtimespec);
+    if (outCreatedTime) *outCreatedTime = st.st_birthtimespec.tv_sec > 0 ? FileTimeFromTimespec(st.st_birthtimespec) : 0;
 #else
     outLastWriteTime = FileTimeFromTimespec(st.st_mtim);
+    if (outCreatedTime) *outCreatedTime = ReadFileCreationTime(path);
 #endif
     return true;
+}
+
+uint64_t ReadFileCreationTime(const std::wstring& path) {
+    const auto native = ToUtf8(path);
+#ifdef __APPLE__
+    struct stat st{};
+    if (lstat(native.c_str(), &st) != 0 || !S_ISREG(st.st_mode) || st.st_birthtimespec.tv_sec <= 0) return 0;
+    return FileTimeFromTimespec(st.st_birthtimespec);
+#elif defined(STATX_BTIME)
+    struct statx stx{};
+    if (statx(AT_FDCWD, native.c_str(), AT_SYMLINK_NOFOLLOW, STATX_TYPE | STATX_BTIME, &stx) == 0 &&
+        (stx.stx_mask & STATX_TYPE) && S_ISREG(stx.stx_mode) &&
+        (stx.stx_mask & STATX_BTIME) && stx.stx_btime.tv_sec > 0) {
+        timespec ts{static_cast<time_t>(stx.stx_btime.tv_sec), static_cast<long>(stx.stx_btime.tv_nsec)};
+        return FileTimeFromTimespec(ts);
+    }
+    return 0;
+#else
+    (void)native;
+    return 0;
+#endif
 }
 
 bool EnumerateDirectory(const std::wstring& directory,
@@ -256,6 +279,7 @@ bool EnumerateDirectory(const std::wstring& directory,
             entry.fileSize = static_cast<uint64_t>(st.st_size);
 #ifdef __APPLE__
             entry.lastWriteTime = FileTimeFromTimespec(st.st_mtimespec);
+            entry.createdTime = st.st_birthtimespec.tv_sec > 0 ? FileTimeFromTimespec(st.st_birthtimespec) : 0;
 #else
             entry.lastWriteTime = FileTimeFromTimespec(st.st_mtim);
 #endif

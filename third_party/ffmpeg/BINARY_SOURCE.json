@@ -2,6 +2,6 @@
   "version": "n8.1.3-24-g92611900bb-compareel-min",
   "source_commit": "92611900bb112123e9bf997fdcc2d78e4c4922fc",
   "source_archive": "FFmpeg-92611900bb.tar.gz",
-  "toolchain_image": "ghcr.io/btbn/ffmpeg-builds/win64-lgpl-8.1@sha256:cba7a58bfca46a17ca41400d462580c8e364dbf27da7b15c0eb1fb607054f74a",
+  "toolchain_image": "ghcr.io/btbn/ffmpeg-builds/win64-lgpl-8.1@sha256:3b58d55fe69e8ea35951dbacffc86f5e396b58cf530e205e7536e00f065cb872",
   "build_script": "tools/ffmpeg-minimal/build.sh"
 }

@@ -6,7 +6,7 @@
 
 namespace StillImages::Internal {
 
-QImage decodeWithQt(QFile& input, const QString& extension, const QByteArray& bytes, std::atomic<bool>& cancel, HRESULT& error, QByteArray& outFormat, bool& outAlreadyWhiteSRgb, ImageExtendedInfo* ext) {
+QImage decodeWithQt(const QString& extension, const QByteArray& bytes, std::atomic<bool>& cancel, HRESULT& error, QByteArray& outFormat, bool& outAlreadyWhiteSRgb, ImageExtendedInfo* ext, int precomputedOrientation) {
     QImage image;
     QBuffer buffer(const_cast<QByteArray*>(&bytes));
     buffer.open(QIODevice::ReadOnly);
@@ -97,8 +97,8 @@ QImage decodeWithQt(QFile& input, const QString& extension, const QByteArray& by
 
     if (isAnimated) {
         image = decodeQtAnimated(reader, cancel, error, ext);
+        if (!format.isEmpty()) outFormat = format;
         if (image.isNull()) return {};
-        outFormat = format;
         outAlreadyWhiteSRgb = true;
         return image;
     }
@@ -143,10 +143,9 @@ QImage decodeWithQt(QFile& input, const QString& extension, const QByteArray& by
         return ext->sampledFrames[0];
     }
 
-    int orientation = 1;
-    if (format == "webp" || format == "png") {
-        input.seek(0);
-        orientation = containerOrientation(input, format == "webp", cancel);
+    int orientation = (precomputedOrientation > 0) ? precomputedOrientation : 1;
+    if (precomputedOrientation == 0 && (format == "webp" || format == "png")) {
+        orientation = containerOrientation(bytes, format == "webp", cancel);
         if (orientation < 0) {
             if (orientation == -2) error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
             if (orientation == -3) error = HRESULT_FROM_WIN32(ERROR_CANCELLED);

@@ -9,4 +9,5 @@ bool supported(const std::wstring& path);
 QImage read(const VideoFileInfo& file, std::atomic<bool>& cancel, HRESULT& error, QByteArray* actualFormat = nullptr, bool allowExtended = false, ImageExtendedInfo* outExt = nullptr);
 QImage readFrameOrPage(const VideoFileInfo& file, int index, std::atomic<bool>& cancel, HRESULT& error, int* outTotalCount = nullptr);
 bool analyze(VideoFileInfo& file, std::atomic<bool>& cancel);
+bool refreshCaptureTime(VideoFileInfo& file, std::atomic<bool>& cancel);
 }

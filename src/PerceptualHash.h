@@ -145,7 +145,20 @@ inline double CompareSpatialDetail(const FrameSignature& a,const FrameSignature&
 
 double CompareImageSignaturesOneWay(const FrameSignature& a, const FrameSignature& b, double scoreFloor = 0);
 
+inline double StructuralScoreUpperBound(uint64_t ah, uint64_t av, uint64_t aa, uint64_t bh, uint64_t bv, uint64_t ba) {
+    const int bits = std::popcount(ah ^ bh) + std::popcount(av ^ bv) + std::popcount(aa ^ ba);
+    return 100.0 - 65.0 * (static_cast<double>(bits) / 192.0);
+}
+
 inline double CompareImageSignatures(const FrameSignature& a,const FrameSignature& b,double scoreFloor=0) {
+    if(scoreFloor>0.0 && a.valid && b.valid && !a.lowVariance && !b.lowVariance) {
+        const double ub=StructuralScoreUpperBound(a.dHashH,a.dHashV,a.aHash,b.dHashH,b.dHashV,b.aHash);
+        if(ub+1e-5<scoreFloor) return ub;
+        const double first=CompareImageSignaturesOneWay(a,b,scoreFloor);
+        const double secondFloor=std::max(scoreFloor,first);
+        if(ub+1e-5<secondFloor) return first;
+        return std::max(first,CompareImageSignaturesOneWay(b,a,secondFloor));
+    }
     const double first=CompareImageSignaturesOneWay(a,b,scoreFloor);
     return std::max(first,CompareImageSignaturesOneWay(b,a,std::max(scoreFloor,first)));
 }
@@ -178,10 +191,16 @@ inline double CompareImageSignaturesWithCrop(const FrameSignature& a, const Fram
     double best = CompareImageSignatures(a, b,scoreFloor);
     if (!a.valid || !b.valid || a.lowVariance || b.lowVariance) return best;
     if (a.hasCenterCrop) {
-        best = std::max(best, CompareImageSignatures(MakeCenterCropSignature(a), b,std::max(scoreFloor,best)));
+        const double cropFloor = std::max(scoreFloor, best);
+        if (cropFloor <= 0.0 || StructuralScoreUpperBound(a.centerDHashH, a.centerDHashV, a.centerAHash, b.dHashH, b.dHashV, b.aHash) + 1e-5 >= cropFloor) {
+            best = std::max(best, CompareImageSignatures(MakeCenterCropSignature(a), b, cropFloor));
+        }
     }
     if (b.hasCenterCrop) {
-        best = std::max(best, CompareImageSignatures(a, MakeCenterCropSignature(b),std::max(scoreFloor,best)));
+        const double cropFloor = std::max(scoreFloor, best);
+        if (cropFloor <= 0.0 || StructuralScoreUpperBound(a.dHashH, a.dHashV, a.aHash, b.centerDHashH, b.centerDHashV, b.centerAHash) + 1e-5 >= cropFloor) {
+            best = std::max(best, CompareImageSignatures(a, MakeCenterCropSignature(b), cropFloor));
+        }
     }
     return best;
 }

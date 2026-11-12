@@ -49,7 +49,7 @@ void MainWindow::deleteFocusedFile() {
     const auto& file=files_[panel->fileIndex];
     if(file.protectedFile || protectedByReview(file)) { statusBar()->showMessage(text("Protected")); return; }
     // The keyboard path asks first; the visible trash button keeps its one-click behaviour.
-    if(QMessageBox::question(this,text("Move to Recycle Bin"),text("Move this file to the Recycle Bin?")+"\n\n"+QString::fromStdWString(file.fullPath),QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Yes) return;
+    if(plainQuestion(this,text("Move to Recycle Bin"),text("Move this file to the Recycle Bin?")+"\n\n"+QString::fromStdWString(file.fullPath),QMessageBox::Yes|QMessageBox::Cancel,QMessageBox::Cancel)!=QMessageBox::Yes) return;
     deleteFile(panel);
 }
 
@@ -80,7 +80,7 @@ void MainWindow::chooseTransfer(int index,const QString& operation) {
     if(operation=="quarantine") directory=QDir(folder).filePath("Compareel-"+QDateTime::currentDateTimeUtc().toString("yyyyMMdd-HHmmss")+"-"+QUuid::createUuid().toString(QUuid::WithoutBraces).left(8));
     const auto destination=QDir(directory).filePath(QString::fromStdWString(file.fileName));
     const auto explanation=text(operation=="copy"?"Create a verified copy? Existing files are never overwritten.":"Create a verified copy at the destination, then move the source to Recycle Bin? Existing files are never overwritten.");
-    if(QMessageBox::question(this,title,explanation+"\n\n"+QString::fromStdWString(file.fullPath)+"\n→ "+QDir::toNativeSeparators(destination),QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
+    if(plainQuestion(this,title,explanation+"\n\n"+QString::fromStdWString(file.fullPath)+"\n→ "+QDir::toNativeSeparators(destination),QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
     if(operation=="quarantine" && !QDir().mkpath(directory)) { QMessageBox::warning(this,title,text("The destination folder could not be created.")); return; }
     settings_.setValue("transferFolder",folder);
     startTransfer(file,destination,operation);
@@ -95,7 +95,7 @@ void MainWindow::undoLastTransfer() {
     if(scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_) return;
     ScanCache cache(cachePath_); const auto record=cache.lastUndoableTransfer();
     if(!record) { updateUndoAction(); return; }
-    if(QMessageBox::question(this,text("Undo last copy or move…"),text("Undo this transfer? A moved file returns to its original path; a copied file goes to Recycle Bin. Changed or occupied paths are refused.")+"\n\n"+record->source+"\n← "+record->destination,QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
+    if(plainQuestion(this,text("Undo last copy or move…"),text("Undo this transfer? A moved file returns to its original path; a copied file goes to Recycle Bin. Changed or occupied paths are refused.")+"\n\n"+record->source+"\n← "+record->destination,QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
     VideoFileInfo source; source.fullPath=record->source.toStdWString(); source.identity=record->sourceIdentity;
     startTransfer(source,record->destination,record->operation,&*record);
 }
@@ -143,6 +143,7 @@ void MainWindow::startTransfer(const VideoFileInfo& file,const QString& destinat
             if(outcome.operation.copied && !outcome.operation.succeeded()) message+="\n"+text("A copy was created. Inspect both paths before retrying.");
             if(!cacheError_.isEmpty()) message+="\n"+cacheError_;
             auto warning=new QMessageBox(QMessageBox::Warning,text("File operation failed"),message,QMessageBox::Ok,this);
+            warning->setTextFormat(Qt::PlainText);
             warning->setAttribute(Qt::WA_DeleteOnClose); warning->setWindowModality(Qt::WindowModal); warning->open();
         }
         if(pendingClose_) close();
@@ -180,7 +181,7 @@ void MainWindow::startTransfer(const VideoFileInfo& file,const QString& destinat
 }
 void MainWindow::refreshTransferResults() {
     std::vector<int> candidates;
-    for(int i=0;i<int(files_.size());++i) if(!files_[i].deleted && !files_[i].corrupted) candidates.push_back(i);
+    for(int i=0;i<int(files_.size());++i) if(!files_[i].deleted && !files_[i].corrupted && (manual_ || (files_[i].fileSize>=scanCriteria_.minFileSize && files_[i].fileSize<=scanCriteria_.maxFileSize))) candidates.push_back(i);
     const int previousGroup=currentGroup_;
     std::vector<std::pair<int,int>> pairs;
     for(const auto& group:groups_) if(group.fileIndices.size()>=2) pairs.emplace_back(group.fileIndices.front(),group.fileIndices[group.rightSlot]);
@@ -206,7 +207,7 @@ void MainWindow::deleteFile(PlayerPanel* panel) {
     // so an unplugged drive or a copy deleted elsewhere never turns this into removing the last one.
     const auto& members=groups_[currentGroup_].fileIndices;
     const bool otherCopy=std::any_of(members.begin(),members.end(),[&](int other) {
-        return other!=index && !files_[other].deleted && files_[other].identity.valid && files_[other].identity!=originalIdentity
+        return other!=index && !files_[other].deleted && files_[other].identity.valid && !SamePhysicalFile(files_[other],file)
             && FileOperations::ReadIdentity(files_[other].fullPath)==files_[other].identity;
     });
     if(!otherCopy) {
@@ -230,14 +231,14 @@ void MainWindow::deleteFile(PlayerPanel* panel) {
         centralWidget()->setEnabled(true); menuBar()->setEnabled(true); cacheError_=outcome.journalError;
         finishCleanupRecovery();
         if(!result.succeeded()) {
-            if(!pendingClose_) QMessageBox::warning(this,text("File operation failed"),outcome.recoveryFailed?text("The recovery review could not be saved. No files were moved.")
+            if(!pendingClose_) plainWarning(this,text("File operation failed"),outcome.recoveryFailed?text("The recovery review could not be saved. No files were moved.")
                 : QString::fromStdWString(result.message())+(cacheError_.isEmpty()?QString():"\n"+cacheError_));
             selectGroup(currentGroup_); if(pendingClose_) close(); return;
         }
         auto& file=files_[index]; file.deleted=true; markedFiles_.remove(index); QString removed=QString::fromStdWString(file.fileName);
-        if(!cacheError_.isEmpty() && !pendingClose_) QMessageBox::warning(this,text("Operation history"),cacheError_);
+        if(!cacheError_.isEmpty() && !pendingClose_) plainWarning(this,text("Operation history"),cacheError_);
         if(scanCriteria_.crossFolderOnly && !manual_) {
-            std::vector<int> candidates; for(int i=0;i<int(files_.size());++i) if(!files_[i].deleted && !files_[i].corrupted) candidates.push_back(i);
+            std::vector<int> candidates; for(int i=0;i<int(files_.size());++i) if(!files_[i].deleted && !files_[i].corrupted && files_[i].fileSize>=scanCriteria_.minFileSize && files_[i].fileSize<=scanCriteria_.maxFileSize) candidates.push_back(i);
             std::atomic<bool> cancel{false}; VideoScanner::GroupKnownFiles(files_,std::move(candidates),scanCriteria_,groups_,cancel);
             populateResults(); currentGroup_=-1;
             if(!groups_.empty()) {
@@ -251,17 +252,15 @@ void MainWindow::deleteFile(PlayerPanel* panel) {
         const int groupsBefore=int(groups_.size())-1;
         groups_.erase(groups_.begin()+groupIndex);
         if(remaining.size()>=2) {
-            std::vector<VideoFileInfo> subset; for(int member:remaining) subset.push_back(files_[member]);
             std::vector<VideoGroup> replacement; std::atomic<bool> cancel{false}; auto criteria=scanCriteria_; criteria.loadPreviews=false;
             { ScanCache cache(cachePath_); criteria.ignoredPairs=cache.ignoredPairs(); }
             if(manual_) {
-                VideoGroup g; for(int i=0;i<static_cast<int>(remaining.size());++i) g.fileIndices.push_back(i);
+                VideoGroup g; g.fileIndices=remaining; g.manualReference=true;
                 replacement.push_back(std::move(g));
             } else {
-                VideoScanner::AnalyzeAndGroup(subset,criteria,replacement,cancel,{}, {},nullptr,[&](auto& file) { StillImages::analyze(file,cancel); });
+                VideoScanner::GroupKnownFiles(files_,remaining,criteria,replacement,cancel);
             }
             for(auto& group:replacement) {
-                for(auto& member:group.fileIndices) member=remaining[member];
                 if(index!=previousLeftIndex) {
                     auto it=std::find(group.fileIndices.begin(),group.fileIndices.end(),previousLeftIndex);
                     if(it!=group.fileIndices.end() && it!=group.fileIndices.begin()) std::rotate(group.fileIndices.begin(),it,it+1);
@@ -345,6 +344,20 @@ int MainWindow::selectGroupKeeperSlot(const VideoGroup& group, const CleanupRete
         case RetentionAttribute::ModifiedOldest:
             if(a.identity.modified!=b.identity.modified) return a.identity.modified<b.identity.modified;
             break;
+        case RetentionAttribute::CreatedOldest: {
+            const uint64_t ca=a.createdTime?a.createdTime:a.identity.modified;
+            const uint64_t cb=b.createdTime?b.createdTime:b.identity.modified;
+            if(ca!=cb) return ca<cb;
+            break;
+        }
+        case RetentionAttribute::CaptureOldest: {
+            if((a.captureTimeSec>0)!=(b.captureTimeSec>0)) return a.captureTimeSec>0;
+            if(a.captureTimeSec>0 && a.captureTimeSec!=b.captureTimeSec) return a.captureTimeSec<b.captureTimeSec;
+            const uint64_t ca=a.createdTime?a.createdTime:a.identity.modified;
+            const uint64_t cb=b.createdTime?b.createdTime:b.identity.modified;
+            if(ca!=cb) return ca<cb;
+            break;
+        }
         }
         const bool protA=isProtected(a), protB=isProtected(b);
         if(protA!=protB) return protA;
@@ -358,17 +371,17 @@ int MainWindow::selectGroupKeeperSlot(const VideoGroup& group, const CleanupRete
     return bestSlot;
 }
 std::vector<MainWindow::CleanupTarget> MainWindow::cleanupPlan(const CleanupRetentionRule& rule) const {
-    std::set<std::pair<uint64_t,uint64_t>> keeperIds;
+    std::set<std::wstring> keeperIds;
     std::vector<int> groupKeeperSlots(groups_.size(),-1);
     for(size_t g=0;g<groups_.size();++g) {
         const int keeperSlot=selectGroupKeeperSlot(groups_[g],rule);
         groupKeeperSlots[g]=keeperSlot;
         if(keeperSlot>=0) {
             const auto& keeper=files_[groups_[g].fileIndices[keeperSlot]];
-            if(keeper.identity.valid) keeperIds.insert({keeper.identity.volume,keeper.identity.index});
+            if(keeper.identity.valid) keeperIds.insert(PhysicalFileKey(keeper));
         }
     }
-    std::set<std::pair<uint64_t,uint64_t>> plannedIds;
+    std::set<std::wstring> plannedIds;
     std::vector<CleanupTarget> plan;
     for(size_t g=0;g<groups_.size();++g) {
         const int keeperSlot=groupKeeperSlots[g];
@@ -378,7 +391,7 @@ std::vector<MainWindow::CleanupTarget> MainWindow::cleanupPlan(const CleanupRete
             if(slot==keeperSlot) continue;
             const int index=groups_[g].fileIndices[slot]; const auto& file=files_[index];
             if(file.deleted || file.protectedFile || file.protectedByFolder || protectedByReview(file) || !file.identity.valid) continue;
-            const auto key=std::make_pair(file.identity.volume,file.identity.index);
+            const auto key=PhysicalFileKey(file);
             // A file retained by any group must never become another group's removal target.
             if(keeperIds.contains(key) || (!manual_ && !VideoScanner::FilesMatch(keeper,file,scanCriteria_)) || !plannedIds.insert(key).second) continue;
             plan.push_back({index,file,keeper});
@@ -391,14 +404,15 @@ void MainWindow::previewBulkCleanup() {
     CleanupRetentionRule activeRule;
     // Resolution, duration and FPS rules need metadata; it is read on a worker so slow or network drives cannot freeze the window.
     // Returns false when cancelled; the caller then keeps the previous rule.
-    auto ensureGroupMetadata=[this](QWidget* parent) {
+    auto ensureGroupMetadata=[this](QWidget* parent,bool needCaptureDate) {
         std::vector<std::pair<int,VideoFileInfo>> missing; QSet<int> seen;
         for(const auto& group:groups_) for(int idx:group.fileIndices) {
             const auto& f=files_[idx];
-            if(!f.deleted && !f.metadataLoaded && f.identity.valid && !seen.contains(idx)) { seen.insert(idx); missing.emplace_back(idx,f); }
+            const bool lacksMeta=!f.metadataLoaded || (needCaptureDate && StillImages::supported(f.fullPath) && f.cachedDetailsVersion<2);
+            if(!f.deleted && !f.corrupted && !f.previewFailed && lacksMeta && f.identity.valid && !seen.contains(idx)) { seen.insert(idx); missing.emplace_back(idx,f); }
         }
         if(missing.empty()) return true;
-        QProgressDialog progress(text("Reading video information…"),text("Cancel"),0,int(missing.size()),parent);
+        QProgressDialog progress(text(options_.images?"Reading image information…":"Reading video information…"),text("Cancel"),0,int(missing.size()),parent);
         progress.setWindowModality(Qt::WindowModal); progress.setMinimumDuration(400); progress.setAutoClose(false); progress.setAutoReset(false);
         cancel_.store(false); sortingMetadata_=true;
         auto done=std::make_shared<std::atomic<int>>(0);
@@ -429,6 +443,8 @@ void MainWindow::previewBulkCleanup() {
     ruleCombo->addItem(text("Smallest file size"),int(RetentionAttribute::SizeSmallest));
     ruleCombo->addItem(text("Newest modified date"),int(RetentionAttribute::ModifiedNewest));
     ruleCombo->addItem(text("Oldest modified date"),int(RetentionAttribute::ModifiedOldest));
+    ruleCombo->addItem(text("Oldest creation date"),int(RetentionAttribute::CreatedOldest));
+    if(options_.images) ruleCombo->addItem(text("Oldest date taken (EXIF)"),int(RetentionAttribute::CaptureOldest));
     ruleRow->addWidget(ruleCombo,1);
     auto folderLabel=new QLabel(text("Preferred folder"),&dialog); ruleRow->addWidget(folderLabel);
     auto folderCombo=new QComboBox(&dialog); folderCombo->setObjectName("preferredFolderCombo"); folderCombo->setAccessibleName(text("Preferred folder"));
@@ -489,9 +505,14 @@ void MainWindow::previewBulkCleanup() {
     int appliedRule=ruleCombo->currentIndex();
     auto refreshDialogPlan=[&] {
         const auto attribute=static_cast<RetentionAttribute>(ruleCombo->currentData().toInt());
-        if((attribute==RetentionAttribute::ResolutionHighest || attribute==RetentionAttribute::DurationLongest || attribute==RetentionAttribute::FpsHighest) && !ensureGroupMetadata(&dialog)) {
+        if((attribute==RetentionAttribute::ResolutionHighest || attribute==RetentionAttribute::DurationLongest || attribute==RetentionAttribute::FpsHighest || attribute==RetentionAttribute::CaptureOldest) && !ensureGroupMetadata(&dialog,attribute==RetentionAttribute::CaptureOldest)) {
             if(pendingClose_) { dialog.reject(); return; }
             QSignalBlocker blocker(ruleCombo); ruleCombo->setCurrentIndex(appliedRule);
+        }
+        if(attribute==RetentionAttribute::CreatedOldest || attribute==RetentionAttribute::CaptureOldest) {
+            for(const auto& group:groups_) for(int idx:group.fileIndices)
+                if(files_[idx].createdTime==0 && files_[idx].identity.valid && !files_[idx].deleted)
+                    files_[idx].createdTime=Platform::ReadFileCreationTime(files_[idx].fullPath);
         }
         appliedRule=ruleCombo->currentIndex();
         activeRule.attribute=static_cast<RetentionAttribute>(ruleCombo->currentData().toInt());
@@ -577,6 +598,7 @@ void MainWindow::executeBulkCleanup(std::vector<CleanupTarget> plan) {
         if((!result.errors.empty() || !result.cacheError.isEmpty()) && !pendingClose_) {
             // Do not enter a nested exec loop while the modal progress window is retiring.
             auto warning=new QMessageBox(QMessageBox::Warning,text("File operation failed"),result.errors.join("\n\n")+(result.cacheError.isEmpty()?QString():"\n"+result.cacheError),QMessageBox::Ok,this);
+            warning->setTextFormat(Qt::PlainText);
             warning->setAttribute(Qt::WA_DeleteOnClose); warning->setWindowModality(Qt::WindowModal); warning->open();
         }
         if(pendingClose_) close();
@@ -592,7 +614,7 @@ void MainWindow::executeBulkCleanup(std::vector<CleanupTarget> plan) {
                 auto& file=entry->second; file.fullPath=source.fullPath; file.fileName=source.fileName;
                 file.identity=source.identity; file.fileSize=source.fileSize; file.comparisonRoot=source.comparisonRoot;
                 if(FileOperations::ReadIdentity(file.fullPath)!=file.identity) file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
-                else if(criteria.matchContent) file.contentHash=FileOperations::ContentHash(file.fullPath,bulkCancel_,file.error);
+                else if(criteria.matchContent) file.contentHash=FileOperations::ContentHash(file.fullPath,bulkCancel_,file.error,file.identity);
                 else if(criteria.images && (criteria.matchFirstFrame || criteria.matchResolution)) StillImages::analyze(file,bulkCancel_);
                 else if(criteria.matchFirstFrame || criteria.matchVisualSamples) VideoScanner::ExtractMetadataAndFrame(file,criteria.matchVisualSamples,&bulkCancel_);
                 else if(criteria.matchDuration || criteria.matchResolution) VideoScanner::ExtractMetadataOnly(file,&bulkCancel_);
@@ -645,18 +667,41 @@ void MainWindow::previewCleanupMarks() {
     // Size and status take the width their text needs; the path column gives way and its full text is in the tooltip.
     tree->header()->setStretchLastSection(false); tree->header()->setSectionResizeMode(1,QHeaderView::ResizeToContents); tree->header()->setSectionResizeMode(2,QHeaderView::ResizeToContents);
     // Cross-folder groups can share a file; one kept as a group's reference must not be proposed for removal in another group.
-    QSet<int> references; for(const auto& group:groups_) if(!group.fileIndices.empty()) references.insert(group.fileIndices[0]);
+    std::set<std::wstring> keeperIds;
     for(const auto& group:groups_) {
-        auto heading=new QTreeWidgetItem(tree,{QString::fromStdWString(files_[group.fileIndices[0]].fullPath),{},text("Keep (left file)")}); heading->setExpanded(true); heading->setToolTip(0,heading->text(0));
+        if(group.fileIndices.size()<2) continue;
+        const auto& keeper=files_[group.fileIndices[0]];
+        if(!keeper.deleted && keeper.identity.valid) keeperIds.insert(PhysicalFileKey(keeper));
+    }
+    bool hasIndirect=false;
+    for(const auto& group:groups_) {
+        if(group.fileIndices.size()<2) continue;
+        const auto& keeper=files_[group.fileIndices[0]];
+        if(keeper.deleted || !keeper.identity.valid) continue;
+        auto heading=new QTreeWidgetItem(tree,{QString::fromStdWString(keeper.fullPath),{},text("Keep (left file)")}); heading->setExpanded(true); heading->setToolTip(0,heading->text(0));
         for(size_t slot=1;slot<group.fileIndices.size();++slot) {
             int index=group.fileIndices[slot]; const auto& file=files_[index];
-            bool protectedFile=file.protectedFile || protectedByReview(file); const bool keptElsewhere=references.contains(index);
-            auto row=new QTreeWidgetItem(heading,{QString::fromStdWString(file.fullPath),QString::fromStdWString(FormatBytesShort(file.fileSize)),
-                protectedFile?text("Protected"):keptElsewhere?text("Kept as another group's reference"):text(scanCriteria_.matchContent&&!manual_?"Content verified":"Review candidate")});
-            row->setToolTip(0,row->text(0)); row->setToolTip(2,row->text(2));
-            row->setData(0,Qt::UserRole,index); row->setCheckState(0,protectedFile || keptElsewhere?Qt::Unchecked:Qt::Checked);
-            if(protectedFile || keptElsewhere) row->setDisabled(true);
+            if(file.deleted || !file.identity.valid) continue;
+            const bool protectedFile=file.protectedFile || file.protectedByFolder || protectedByReview(file);
+            const bool keptElsewhere=keeperIds.contains(PhysicalFileKey(file));
+            const bool directMatch=manual_ || VideoScanner::FilesMatch(keeper,file,scanCriteria_);
+            if(!directMatch && !protectedFile && !keptElsewhere) hasIndirect=true;
+            const bool eligible=!protectedFile && !keptElsewhere && directMatch;
+            const QString status=protectedFile?text("Protected")
+                :keptElsewhere?text("Kept as another group's reference")
+                :!directMatch?text("Keep")
+                :text(scanCriteria_.matchContent&&!manual_?"Content verified":"Review candidate");
+            auto row=new QTreeWidgetItem(heading,{QString::fromStdWString(file.fullPath),QString::fromStdWString(FormatBytesShort(file.fileSize)),status});
+            row->setToolTip(0,row->text(0));
+            row->setToolTip(2,!directMatch && !protectedFile && !keptElsewhere
+                ?text("Related groups may contain indirect matches. Only direct matches to the retained file are included in this plan.")
+                :row->text(2));
+            row->setData(0,Qt::UserRole,index); row->setCheckState(0,eligible?Qt::Checked:Qt::Unchecked);
+            if(!eligible) row->setDisabled(true);
         }
+    }
+    if(hasIndirect) {
+        note->setText(note->text()+" "+text("Related groups may contain indirect matches. Only direct matches to the retained file are included in this plan."));
     }
     // An accept button, so each platform puts it in its usual place next to Cancel.
     auto buttons=new QDialogButtonBox(QDialogButtonBox::Ok|QDialogButtonBox::Cancel,&dialog);
@@ -665,16 +710,21 @@ void MainWindow::previewCleanupMarks() {
     if(dialog.exec()!=QDialog::Accepted) return;
     markedFiles_.clear();
     for(int g=0;g<tree->topLevelItemCount();++g) for(int slot=0;slot<tree->topLevelItem(g)->childCount();++slot) {
-        auto row=tree->topLevelItem(g)->child(slot); int index=row->data(0,Qt::UserRole).toInt();
-        if(row->checkState(0)==Qt::Checked && !files_[index].protectedFile && !references.contains(index)) markedFiles_.insert(index);
+        auto row=tree->topLevelItem(g)->child(slot);
+        if(row->isDisabled() || row->checkState(0)!=Qt::Checked) continue;
+        int index=row->data(0,Qt::UserRole).toInt();
+        if(index<0 || index>=int(files_.size())) continue;
+        const auto& file=files_[index];
+        if(!file.deleted && file.identity.valid && !file.protectedFile && !file.protectedByFolder && !protectedByReview(file) && !keeperIds.contains(PhysicalFileKey(file)))
+            markedFiles_.insert(index);
     }
     populateResults();
     if(!markedFiles_.isEmpty()) statusBar()->showMessage(text("%1 files marked. Use Move marked files to Recycle Bin… to remove them.").arg(markedFiles_.size()));
 }
 
 std::vector<MainWindow::CleanupTarget> MainWindow::markedCleanupPlan() const {
-    std::set<std::pair<uint64_t,uint64_t>> markedIds,plannedIds;
-    for(int index:markedFiles_) if(files_[index].identity.valid) markedIds.insert({files_[index].identity.volume,files_[index].identity.index});
+    std::set<std::wstring> markedIds,plannedIds;
+    for(int index:markedFiles_) if(files_[index].identity.valid) markedIds.insert(PhysicalFileKey(files_[index]));
     std::vector<CleanupTarget> plan;
     for(const auto& group:groups_) for(int index:group.fileIndices) {
         if(!markedFiles_.contains(index)) continue;
@@ -684,10 +734,10 @@ std::vector<MainWindow::CleanupTarget> MainWindow::markedCleanupPlan() const {
         const VideoFileInfo* keeper=nullptr;
         for(int other:group.fileIndices) {
             const auto& candidate=files_[other];
-            if(other==index || candidate.deleted || !candidate.identity.valid || markedIds.contains({candidate.identity.volume,candidate.identity.index})) continue;
+            if(other==index || candidate.deleted || !candidate.identity.valid || markedIds.contains(PhysicalFileKey(candidate))) continue;
             if(manual_ || VideoScanner::FilesMatch(candidate,file,scanCriteria_)) { keeper=&candidate; break; }
         }
-        if(keeper && plannedIds.insert({file.identity.volume,file.identity.index}).second) plan.push_back({index,file,*keeper});
+        if(keeper && plannedIds.insert(PhysicalFileKey(file)).second) plan.push_back({index,file,*keeper});
     }
     return plan;
 }
@@ -704,6 +754,7 @@ void MainWindow::removeMarkedFiles() {
     QMessageBox box(QMessageBox::Warning,text("Move marked files to Recycle Bin…"),
         text("Move %1 marked files (%2) to the Recycle Bin? Each one keeps an unmarked matching copy. Files are verified again before moving.").arg(plan.size()).arg(QString::fromStdWString(FormatBytesShort(bytes))),
         QMessageBox::NoButton,this);
+    box.setTextFormat(Qt::PlainText);
     box.setDetailedText(lines.join('\n'));
     auto confirm=box.addButton(plan.size()==1?text("Move 1 file to Recycle Bin"):text("Move %1 files to Recycle Bin").arg(plan.size()),QMessageBox::DestructiveRole);
     confirm->setObjectName("dangerButton"); confirm->setAutoDefault(false);

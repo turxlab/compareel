@@ -1,6 +1,6 @@
 ---
 title: Privacy and local data
-description: Learn how Compareel processes all videos and images locally on your computer with zero telemetry, how Privacy mode works, and how to clear local history.
+description: Learn how Compareel processes all videos and images locally on your computer with zero telemetry, how hiding previews works, and how to clear local history.
 nav_order: 6
 ---
 
@@ -16,18 +16,18 @@ Compareel analyzes and compares all media locally on your computer. There are no
 
 You can review a summary of local storage inside the app at any time from **Help** > **Data and privacy** (or the **Data and privacy** button in **Tools** > **Settings…**).
 
-## Privacy mode
+## Hide all previews
 
-Press `Ctrl+Shift+H` (`Cmd+Shift+H` on macOS), click the **Privacy** eye button in the toolbar, or choose **View** > **Privacy mode** to hide both player previews and result thumbnails on screen at once and pause playback.
+Press `Ctrl+Shift+H` (`Cmd+Shift+H` on macOS), click the **Hide** eye button in the toolbar, or choose **View** > **Hide all previews** to hide both player previews and result thumbnails on screen at once and pause playback.
 
 You can also hide either part on its own from the **View** menu:
 
 - **Hide both video previews** (shown as **Hide both image previews** in **Images** mode)
 - **Hide thumbnails**
 
-While **Privacy mode** is turned on, automatic background saving of `last-review.cvsession` (**Remember last review**) is paused.
+While **Hide all previews** is turned on, automatic background saving of `last-review.cvsession` (**Remember last review**) is paused.
 
-**Important limitation:** **Privacy mode** only hides images and videos on screen. Compareel does not encrypt or securely erase your media files, local cache database, saved `.cvsession` files, operation history, or **Quarantine…** copies on disk.
+**Important limitation:** **Hide all previews** only hides images and videos on screen. Compareel does not encrypt or securely erase your media files, local cache database, saved `.cvsession` files, operation history, or **Quarantine…** copies on disk.
 
 ## Clear history
 

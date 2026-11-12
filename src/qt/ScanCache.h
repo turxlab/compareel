@@ -25,10 +25,11 @@ public:
     static constexpr qint64 MaxMediaPayloadBytes=256LL*1024*1024;
     static constexpr int MaxMediaEntries=100000;
     static QByteArray encodeEvidence(const VideoFileInfo& file);
-    static bool decodeEvidence(const QByteArray& payload,VideoFileInfo& file);
+    static bool decodeEvidence(const QByteArray& payload,VideoFileInfo& file,bool allowLegacyRenderVersion=false);
     explicit ScanCache(const QString& path);
     ~ScanCache();
     bool restore(VideoFileInfo& file);
+    unsigned restoreBatch(std::vector<VideoFileInfo>& files,const std::atomic<bool>& cancel);
     // Pruning scans the whole table; batched writers defer it to prune() at the end.
     void store(const std::vector<VideoFileInfo>& files,bool pruneNow=true);
     void prune();

@@ -32,13 +32,13 @@ void MainWindow::createActions() {
     foldersAction_=action("Scan sources…",QKeySequence::Open,[this] { chooseFolders(); }); foldersAction_->setIcon(icon(Glyph::Folder));
     // Scan is only ever shown on accent buttons; in menus its icon would vanish on a light theme.
     rescanAction_=action("Scan",QKeySequence(Qt::Key_F5),[this] { startScan(); }); rescanAction_->setIcon(icon(Glyph::Search,"@onAccent")); rescanAction_->setIconVisibleInMenu(false);
-    stopAction_=action("Stop scan",QKeySequence(Qt::Key_Escape),[this] { pausedScan_=false; cancel_.store(true); statusBar()->showMessage(text("Stopping…")); }); stopAction_->setIcon(icon(Glyph::Stop)); stopAction_->setEnabled(false);
-    pauseAction_=action("Pause scan",QKeySequence("Ctrl+Shift+P"),[this] { if(!scanning_) return; pausedScan_=true; cancel_.store(true); saveSettings(); statusBar()->showMessage(text("Stopping…")); }); pauseAction_->setIcon(icon(Glyph::Pause));
+    stopAction_=action("Stop scan",QKeySequence(Qt::Key_Escape),[this] { pausedScan_=false; scanPausable_=false; pauseAction_->setEnabled(false); cancel_.store(true); statusBar()->showMessage(text("Stopping…")); }); stopAction_->setIcon(icon(Glyph::Stop)); stopAction_->setEnabled(false);
+    pauseAction_=action("Pause scan",QKeySequence("Ctrl+Shift+P"),[this] { if(!scanning_ || !scanPausable_) return; pausedScan_=true; scanPausable_=false; pauseAction_->setEnabled(false); cancel_.store(true); saveSettings(); statusBar()->showMessage(text("Stopping…")); }); pauseAction_->setIcon(icon(Glyph::Pause));
     resumeAction_=action("Resume paused scan",QKeySequence(),[this] { if(pausedScan_ && !scanning_) startScan(true); });
     pauseAction_->setEnabled(false); resumeAction_->setEnabled(pausedScan_);
     playBothAction_=action("Play / pause both",QKeySequence(Qt::Key_Space),[this] { playBoth(); }); playBothAction_->setIcon(icon(Glyph::Play));
-    previousAction_=action("Previous group",QKeySequence(Qt::ALT|Qt::Key_Left),[this] { selectGroup(currentGroup_-1); }); previousAction_->setIcon(icon(Glyph::PreviousGroup));
-    nextAction_=action("Next group",QKeySequence(Qt::ALT|Qt::Key_Right),[this] { selectGroup(currentGroup_+1); }); nextAction_->setIcon(icon(Glyph::NextGroup));
+    previousAction_=action("Previous group",QKeySequence(Qt::ALT|Qt::Key_Left),[this] { if(const int prev=adjacentVisibleGroup(currentGroup_,-1); prev>=0) selectGroup(prev); }); previousAction_->setIcon(icon(Glyph::PreviousGroup));
+    nextAction_=action("Next group",QKeySequence(Qt::ALT|Qt::Key_Right),[this] { if(const int next=adjacentVisibleGroup(currentGroup_,1); next>=0) selectGroup(next); }); nextAction_->setIcon(icon(Glyph::NextGroup));
     linkAction_=action("Link video controls",QKeySequence("Ctrl+L"),[this] {
         linkedStepFromRight_.reset();
         if(linkAction_->isChecked() && left_->player->IsLoaded() && right_->player->IsLoaded())
@@ -110,7 +110,7 @@ void MainWindow::createActions() {
         if(scanning_ || sortingMetadata_ || fileOperationPending_ || closing_) return;
         if(QMessageBox::question(this,text("Reset all review decisions…"),text("Remove all review notes and their keep/later protection, including pairs outside this scan? Ignored pairs, file/folder locks and operation history remain. No files will be moved."),QMessageBox::Yes|QMessageBox::No,QMessageBox::No)!=QMessageBox::Yes) return;
         ScanCache cache(cachePath_); cache.clearReviewDecisions();
-        if(!cache.error().isEmpty()) { QMessageBox::warning(this,text("Review decision"),cache.error()); return; }
+        if(!cache.error().isEmpty()) { plainWarning(this,text("Review decision"),cache.error()); return; }
         refreshReviewDecisions(); populateResults(); updateReviewState();
     }));
     review->addAction(action("Ignore this pair",QKeySequence("Ctrl+I"),[this] { ignoreCurrentPair(); }));
@@ -118,7 +118,7 @@ void MainWindow::createActions() {
         if(sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_) return;
         if(scanning_) return;
         ScanCache cache(cachePath_); cache.clearIgnoredPairs();
-        if(!cache.error().isEmpty()) { QMessageBox::warning(this,text("Scan report"),cache.error()); return; }
+        if(!cache.error().isEmpty()) { plainWarning(this,text("Scan report"),cache.error()); return; }
         scanCriteria_.ignoredPairs.clear();
         statusBar()->showMessage(text("Ignored pairs were reset. Scan again to show them in the results."));
     }));
@@ -159,11 +159,11 @@ void MainWindow::createActions() {
     tools->addAction(action("Settings…",QKeySequence("Ctrl+,"),[this] { showSettings(); }));
 
     auto view=menuBar()->addMenu(text("View")); view->setObjectName("View");
-    privacyAction_=action("Privacy mode",QKeySequence("Ctrl+Shift+H"),[this] {
+    privacyAction_=action("Hide all previews",QKeySequence("Ctrl+Shift+H"),[this] {
         { QSignalBlocker a(hideVideosAction_),b(hideThumbnailsAction_);
           hideVideosAction_->setChecked(privacyAction_->isChecked()); hideThumbnailsAction_->setChecked(privacyAction_->isChecked()); }
         applyPrivacy();
-        if(privacyAction_->isChecked() && rememberReviewAction_->isChecked()) statusBar()->showMessage(text("While privacy mode is on, the last review is not saved."));
+        if(privacyAction_->isChecked() && rememberReviewAction_->isChecked()) statusBar()->showMessage(text("While all previews are hidden, the last review is not saved."));
     });
     hideVideosAction_=action("Hide both video previews",QKeySequence(),[this] { applyPrivacy(); });
     hideThumbnailsAction_=action("Hide thumbnails",QKeySequence(),[this] { applyPrivacy(); });
@@ -245,7 +245,7 @@ void MainWindow::createActions() {
             text("Current media payloads are limited to 256 MiB and 100,000 entries. Database overhead, history and older cache generations are separate; Clear scan cache also removes older media caches and compacts the database.")+"\n\n"+
             text("Paused folder scans keep a local file list (up to 100,000 files / 32 MiB). It is removed on completion or by Clear scan cache.")+"\n\n"+
             text("Remember last review saves paths, identities, decisions and viewing state in last-review.cvsession. It contains no media or thumbnails. Clear scan cache keeps it; Tools > Settings… > Forget last review removes it and stops remembering.")+" "+
-            text("While privacy mode is on, the last review is not saved.")+"\n\n"+
+            text("While all previews are hidden, the last review is not saved.")+"\n\n"+
             text("Copy/move history keeps both paths, file identities and hashes locally for Undo. Quarantine creates a real media copy in your chosen folder; it is not encrypted. Clear scan cache keeps transfer history.")+"\n\n"+
             text("When update checks are on, Compareel asks GitHub for the number of the latest release at most once a day. Nothing about your files is sent.")+"\n\n"+
             text("Before moving files to Recycle Bin, last-cleanup.cvsession saves the review locally. File > Recover last cleanup review reopens it without repeating file operations. Clear scan cache does not remove this session; it can be removed from the local data folder.")+"\n\n"+text("Local data folder")+": "+QFileInfo(settings_.fileName()).absolutePath());

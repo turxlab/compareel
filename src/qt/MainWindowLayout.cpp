@@ -183,7 +183,7 @@ void MainWindow::createLayout() {
     auto alignmentPanel=new QWidget(comparison); alignmentPanel->setObjectName("alignmentControls"); alignmentPanel->setEnabled(false);
     auto alignmentLayout=new QHBoxLayout(alignmentPanel); alignmentLayout->setContentsMargins(0,0,0,0); alignmentLayout->setSpacing(6); alignmentLayout->setSizeConstraint(QLayout::SetFixedSize);
     auto offsetLabel=new QLabel(alignmentPanel); offsetLabel->setObjectName("offsetLabel"); alignmentLayout->addWidget(offsetLabel);
-    offset_=new QDoubleSpinBox(alignmentPanel); offset_->setObjectName("alignmentOffset"); offset_->setRange(-3600,3600); offset_->setDecimals(3); offset_->setSingleStep(0.1); offset_->setSuffix(" s"); offset_->setFixedHeight(28);
+    offset_=new QDoubleSpinBox(alignmentPanel); offset_->setObjectName("alignmentOffset"); offset_->setRange(-86400,86400); offset_->setDecimals(3); offset_->setSingleStep(0.1); offset_->setSuffix(" s"); offset_->setFixedHeight(28);
     offset_->setFixedWidth(offset_->sizeHint().width()+8); alignmentLayout->addWidget(offset_);
     auto resetOffset=tool(alignmentPanel,Glyph::RestartVideo,"Reset alignment",[this] { offset_->setValue(0); }); resetOffset->setObjectName("resetAlignment"); resetOffset->setFixedSize(28,28); alignmentLayout->addWidget(resetOffset);
     pairInfo->addWidget(alignmentPanel); comparisonLayout->addWidget(pairInfoArea);
@@ -321,7 +321,9 @@ void MainWindow::translate() {
     // Tooltips carry the shortcut so icon-only buttons teach their keyboard path.
     for(const auto& [item,key]:actionTexts_) { item->setText(text(key)); item->setToolTip(item->shortcut().isEmpty()?text(key):text(key)+"  ("+item->shortcut().toString(QKeySequence::NativeText)+")"); }
     if(options_.images) hideVideosAction_->setText(text("Hide both image previews"));
-    privacyAction_->setIconText(text("Privacy"));
+    privacyAction_->setIconText(text("Hide"));
+    if(hideVideosAction_->isChecked() && hideThumbnailsAction_->isChecked())
+        privacyAction_->setToolTip(text("Show all previews")+"  ("+privacyAction_->shortcut().toString(QKeySequence::NativeText)+")");
     for(auto name:{"criteriaSettingsButton","emptyCriteriaButton"}) if(auto button=findChild<QToolButton*>(name)) {
         button->setText(text("Rules")); button->setToolTip(text("Scan rules…")+nativeShortcuts("  (Ctrl+Shift+,)")); button->setAccessibleName(text("Scan rules…"));
     }
@@ -330,7 +332,9 @@ void MainWindow::translate() {
     for(auto label:{"Exact copies",options_.images?"Similar images":"Similar videos","Advanced criteria"}) profile_->addItem(text(label)); profile_->setCurrentIndex(profileIndex);
     mediaMode_->setItemText(0,text("Videos")); mediaMode_->setItemText(1,text("Images"));
     profile_->setToolTip(text(profileIndex==0?"Exact copies are verified with a full SHA-256 content hash.":profileIndex==1?(options_.images?"Oriented sRGB images are compared on white. Visual similarity does not prove identical files.":"Five positions are compared. Audio and subtitle equality is not verified."):"Advanced criteria find candidates; they do not prove identical content."));
-    QSignalBlocker sortBlock(sort_); sort_->clear(); for(auto label:{"Largest first","Smallest first","Longest first","Shortest first","Highest resolution","Lowest resolution","Filename"}) sort_->addItem(text(label)); sort_->setCurrentIndex(static_cast<int>(options_.sortOrder));
+    QSignalBlocker sortBlock(sort_); sort_->clear(); for(auto label:{"Largest first","Smallest first","Longest first","Shortest first","Highest resolution","Lowest resolution","Filename","Highest similarity","Lowest similarity"}) sort_->addItem(text(label)); sort_->setCurrentIndex(static_cast<int>(options_.sortOrder));
+    if(auto model=qobject_cast<QStandardItemModel*>(sort_->model())) for(int index:{2,3}) if(auto item=model->item(index)) item->setEnabled(!options_.images);
+    if(auto view=qobject_cast<QListView*>(sort_->view())) for(int index:{2,3}) view->setRowHidden(index,options_.images);
     fillReferenceRules();
     // Plain wording for the rule; "reference" stays the name of the left file in the players.
     if(auto label=findChild<QLabel*>("referenceRuleLabel")) label->setText(text("Keep in each group"));
@@ -399,7 +403,7 @@ void MainWindow::applyPrivacy() {
     left_->setImagePrivacy(hideVideosAction_->isChecked()); right_->setImagePrivacy(hideVideosAction_->isChecked());
     bool hidden=hideVideosAction_->isChecked();
     privacyAction_->setIcon(icon(hidden && hideThumbnailsAction_->isChecked()?Glyph::EyeOff:Glyph::Eye));
-    privacyAction_->setToolTip(text(hidden && hideThumbnailsAction_->isChecked()?"Show all previews":"Hide all previews"));
+    privacyAction_->setToolTip(text(hidden && hideThumbnailsAction_->isChecked()?"Show all previews":"Hide all previews")+"  ("+privacyAction_->shortcut().toString(QKeySequence::NativeText)+")");
     { QSignalBlocker blocker(privacyAction_); privacyAction_->setChecked(hidden && hideThumbnailsAction_->isChecked()); }
     if(hidden) { syncing_=false; left_->player->Pause(); right_->player->Pause(); }
     left_->canvas->setPreviewHidden(hidden); right_->canvas->setPreviewHidden(hidden);
@@ -413,7 +417,7 @@ void MainWindow::updateEmptyState() {
     // "No matches" describes a scan the user just finished, never one restored from a previous run.
     const bool firstRun=folders_.empty() || !scanCompletedThisSession_;
     // A scan that found no files of the chosen type says so, instead of reporting "no matches" among nothing.
-    const bool noFiles=!firstRun && files_.empty();
+    const bool noFiles=!firstRun && files_.empty() && (!scanMetrics_.compactedFiles || scanMetrics_.discoveredFiles==0);
     if(auto title=emptyState_->findChild<QLabel*>("emptyTitle")) title->setText(text(firstRun?"Find duplicate videos and images":noFiles?"No files to compare":"No matches found"));
     if(auto hint=emptyState_->findChild<QLabel*>("emptyHint")) hint->setText(firstRun
         ?text("Choose what to find, then scan.")

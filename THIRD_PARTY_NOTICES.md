@@ -44,7 +44,7 @@ Windows, and codec availability depends on the installed operating system.
 FFmpeg 8.1 (source commit 92611900bb112123e9bf997fdcc2d78e4c4922fc, release/8.1), dynamically linked LGPLv3 shared libraries built by Compareel from the unmodified source archive in third_party/ffmpeg. The build is decode-only: no encoders, muxers, devices, network protocols or GPL components; only the file protocol and the filters the player uses are enabled. The exact configure options are in third_party/ffmpeg/BUILD_CONFIGURATION.txt and the build script is tools/ffmpeg-minimal/build.sh (run by tools/Build-FFmpegMinimal.ps1). Library replacement and reverse engineering for debugging modifications to these libraries are permitted.
 
 Upstream: https://ffmpeg.org/ and https://github.com/FFmpeg/FFmpeg/tree/92611900bb112123e9bf997fdcc2d78e4c4922fc
-Toolchain image (MinGW-w64 cross compiler and prebuilt external libraries): ghcr.io/btbn/ffmpeg-builds/win64-lgpl-8.1@sha256:cba7a58bfca46a17ca41400d462580c8e364dbf27da7b15c0eb1fb607054f74a, recipes at https://github.com/BtbN/FFmpeg-Builds
+Toolchain image (MinGW-w64 cross compiler and prebuilt external libraries): ghcr.io/btbn/ffmpeg-builds/win64-lgpl-8.1@sha256:3b58d55fe69e8ea35951dbacffc86f5e396b58cf530e205e7536e00f065cb872, recipes at https://github.com/BtbN/FFmpeg-Builds
 Statically included in the FFmpeg libraries:
 - dav1d 1.5.4 (AV1 decoding), BSD-2-Clause, https://code.videolan.org/videolan/dav1d
 - zimg 3.0.6 (zscale filter for HDR tone mapping), WTFPL, https://github.com/sekrit-twc/zimg
@@ -55,7 +55,7 @@ FFmpeg source also incorporates third-party code; its source archive contains th
 
 HEIC/HEIF and AVIF container parsing and still-image conversion use libheif 1.23.7, dynamically linked under LGPL-3.0-or-later. Official source: https://github.com/strukturag/libheif/releases/tag/v1.23.7 . The matching source archive, complete upstream COPYING, and local build recipes are distributed under `third_party/libheif-1.23.7`. Source archive SHA-256: `f7483e818503ea6224c8863e4a56ac02c7089021a98472c811c12aa19faf2475`.
 
-Build: shared library, existing pinned FFmpeg 8.1 decoder backend; external plugin loading, encoder plugins, examples and parallel tile decoding disabled. This does not install system codecs. To rebuild, use the included Setup-FFmpeg.ps1 and Setup-Heif.ps1/Build-Heif.cmd in the project tools layout. Rebuilt compatible heif.dll may replace the distributed DLL. The source archive is unmodified; configuration is in Build-Heif.cmd. FFmpeg's separate notices and corresponding source information also apply.
+Build: shared library, existing pinned FFmpeg 8.1 decoder backend; external plugin loading, encoder plugins, examples and parallel tile decoding disabled. This does not install system codecs. To rebuild, run `tools/Build-FFmpegMinimal.ps1` and `tools/Setup-Heif.ps1` (or `Setup-FFmpeg.ps1` and `Setup-Heif.ps1`/`Build-Heif.cmd` in `third_party/libheif-1.23.7`). Rebuilt compatible heif.dll may replace the distributed DLL. The source archive is unmodified; configuration is in Build-Heif.cmd. FFmpeg's separate notices and corresponding source information also apply.
 
 # miniaudio 0.11.22
 

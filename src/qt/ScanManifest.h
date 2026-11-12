@@ -25,18 +25,21 @@ inline QByteArray context(const ScanCriteria& c) {
     // Sorting and worker limits do not change the frozen input list or matching criteria.
     return QCryptographicHash::hash(bytes,QCryptographicHash::Sha256).toHex();
 }
-inline bool save(const QString& path,const ScanCriteria& criteria,const std::vector<VideoFileInfo>& files) {
-    if(files.size()>100000) return false;
+enum class SaveStatus { Saved, InvalidInput, TooLarge, WriteFailed };
+inline bool save(const QString& path,const ScanCriteria& criteria,const std::vector<VideoFileInfo>& files,SaveStatus* outStatus=nullptr) {
+    auto finish=[&](SaveStatus s) { if(outStatus) *outStatus=s; return s==SaveStatus::Saved; };
+    if(files.size()>100000) return finish(SaveStatus::TooLarge);
     QJsonArray rows;
     for(const auto& file:files) {
-        if(!file.identity.valid || file.deleted) return false;
+        if(!file.identity.valid || file.deleted) return finish(SaveStatus::InvalidInput);
         rows.append(QJsonArray{QString::fromStdWString(file.fullPath),QString::number(file.identity.volume),
             QString::number(file.identity.index),QString::number(file.identity.size),QString::number(file.identity.modified),file.protectedFile,file.protectedByFolder});
     }
     const auto bytes=QJsonDocument(QJsonObject{{"version",criteria.images?2:1},{"context",QString::fromLatin1(context(criteria))},{"files",rows}}).toJson(QJsonDocument::Compact);
-    if(bytes.size()>32*1024*1024) return false;
+    if(bytes.size()>32*1024*1024) return finish(SaveStatus::TooLarge);
     QSaveFile output(path);
-    return output.open(QIODevice::WriteOnly) && output.write(bytes)==bytes.size() && output.commit();
+    if(output.open(QIODevice::WriteOnly) && output.write(bytes)==bytes.size() && output.commit()) return finish(SaveStatus::Saved);
+    return finish(SaveStatus::WriteFailed);
 }
 inline bool load(const QString& manifestPath,const ScanCriteria& criteria,std::vector<VideoFileInfo>& files) {
     QFile input(manifestPath); if(!input.open(QIODevice::ReadOnly) || input.size()>32*1024*1024) return false;
@@ -56,9 +59,13 @@ inline bool load(const QString& manifestPath,const ScanCriteria& criteria,std::v
         VideoFileInfo file; bool ok=false;
         uint64_t* fields[]{&file.identity.volume,&file.identity.index,&file.identity.size,&file.identity.modified};
         for(int i=0;i<4;++i) { *fields[i]=row[i+1].toString().toULongLong(&ok); if(!ok) return false; }
-        const auto id=QString::number(file.identity.volume)+":"+QString::number(file.identity.index);
-        if(physical.contains(id)) return false; physical.insert(id);
-        file.identity.valid=true; file.fullPath=normalized.toStdWString(); file.fileName=QFileInfo(path).fileName().toStdWString();
+        file.identity.valid=true;
+        if(HasUniqueFileIndex(file.identity)) {
+            const auto id=QString::number(file.identity.volume)+":"+QString::number(file.identity.index);
+            if(physical.contains(id)) return false;
+            physical.insert(id);
+        }
+        file.fullPath=normalized.toStdWString(); file.fileName=QFileInfo(path).fileName().toStdWString();
         file.folderPath=QFileInfo(path).absolutePath().toStdWString(); file.fileSize=file.identity.size;
         file.protectedFile=row[5].toBool(); file.protectedByFolder=row[6].toBool();
         if(!(criteria.images?VideoScanner::IsImageExtension(file.fullPath):VideoScanner::IsVideoExtension(file.fullPath)) || std::none_of(criteria.comparisonRoots.begin(),criteria.comparisonRoots.end(),[&](const auto& root) { return VideoScanner::IsWithinFolder(file.fullPath,root); })) return false;

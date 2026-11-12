@@ -14,14 +14,18 @@ struct ImageExtendedInfo {
     ImageEvidenceKind kind = ImageEvidenceKind::StaticImage;
     uint32_t frameOrPageCount = 1;
     int64_t totalDuration100ns = 0;
+    int64_t captureTimeSec = 0;
     double fps = 0.0;
     int requestedIndex = -1;
     std::vector<QImage> sampledFrames;
     bool keepPlaybackFrames=false;
+    bool comparisonTruncated=false;
+    QImage previewFrame;
     std::vector<QImage> playbackFrames;
     std::vector<int64_t> frameDurations;
 };
 
 QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteArray& format, ImageExtendedInfo* ext = nullptr);
+int64_t readHeifCaptureTimeSec(QFile& input, std::atomic<bool>& cancel);
 
 }

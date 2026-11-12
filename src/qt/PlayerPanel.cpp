@@ -25,6 +25,7 @@
 #include <QDialogButtonBox>
 #include <QDir>
 #include <QDateTime>
+#include <QTimeZone>
 #include <QDoubleSpinBox>
 #include <QDragEnterEvent>
 #include <QDropEvent>
@@ -109,7 +110,10 @@ void VideoCanvas::paintEvent(QPaintEvent*) {
             FAILED(player_->GetError()) ? text("Preview unavailable") : text("Loading preview…"));
         return;
     }
-    painter.setRenderHint(QPainter::SmoothPixmapTransform,zoom_ <= 1.0);
+    QSizeF baseSize(frame->width,frame->height); baseSize.scale(this->size(),Qt::KeepAspectRatio); baseSize*=zoom_;
+    const qreal dpr=devicePixelRatioF();
+    const bool smooth=(baseSize.width()*dpr < frame->width*2.0) && (baseSize.height()*dpr < frame->height*2.0);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform,smooth);
     auto draw=[&](const std::shared_ptr<const VideoFrame>& value) {
         QImage image(value->pixels.data(),value->width,value->height,value->width*4,QImage::Format_RGB32);
         QSizeF size=image.size(); size.scale(this->size(),Qt::KeepAspectRatio); size*=zoom_;
@@ -217,14 +221,21 @@ PlayerPanel::PlayerPanel(bool reference,QThreadPool* imagePool,QWidget* parent) 
     mute_=tool(this,Glyph::Volume,"Mute / unmute",[this] { player->SetMuted(!player->IsMuted()); refresh(); }); transport->addWidget(mute_);
     layout->addWidget(transport_); transport_->setObjectName("playerTransport");
     QObject::connect(seek_,&QSlider::sliderMoved,this,[this](int value) {
-        if(still_) { if(imageSeekRequested) imageSeekRequested(value); return; }
+        if(still_) {
+            if(imageDocument()) time_->setText(text("Page %1/%2").arg(std::clamp(value,0,int(imageSequence_.frameOrPageCount)-1)+1).arg(imageSequence_.frameOrPageCount));
+            else if(imageSeekRequested) imageSeekRequested(value);
+            return;
+        }
         if(seekRequested) seekRequested(player->GetDuration100ns()*value/10000,false); else player->ScrubRatio(value/10000.0);
         auto total=player->GetDuration100ns();
         time_->setText(duration(total*value/10000)+" / "+duration(total));
     });
-    QObject::connect(seek_,&QSlider::sliderReleased,this,[this] { if(still_) return; if(seekRequested) seekRequested(player->GetDuration100ns()*seek_->value()/10000,true); else player->SeekRatio(seek_->value()/10000.0); });
+    QObject::connect(seek_,&QSlider::sliderReleased,this,[this] {
+        if(still_) { if(imageSeekRequested) imageSeekRequested(seek_->value()); return; }
+        if(seekRequested) seekRequested(player->GetDuration100ns()*seek_->value()/10000,true); else player->SeekRatio(seek_->value()/10000.0);
+    });
     QObject::connect(seek_,&QSlider::valueChanged,this,[this](int value) {
-        if(still_) { if(imageSeekRequested) imageSeekRequested(value); return; }
+        if(still_) { if(!seek_->isSliderDown() && imageSeekRequested) imageSeekRequested(value); return; }
         if(!seek_->isSliderDown()) { if(seekRequested) seekRequested(player->GetDuration100ns()*value/10000,true); else player->SeekRatio(value/10000.0); }
     });
 
@@ -293,6 +304,13 @@ void PlayerPanel::setFile(const VideoFileInfo* file, int index) {
                 trace(qPrintable("panel image decoded: "+name),*clock);
                 if(revision!=imageRevision_) return;
                 imageSequence_=std::move(result);
+                if(!imageSequence_.playbackFrames.empty()) {
+                    const QSize sz=imageSequence_.sourceSize.isValid()?imageSequence_.sourceSize:imageSequence_.playbackFrames.front().size();
+                    if(sz.width()>0 && sz.height()>0) { self_.width=uint32_t(sz.width()); self_.height=uint32_t(sz.height()); }
+                    self_.captureTimeSec=imageSequence_.captureTimeSec;
+                    self_.metadataLoaded=true; self_.captureKnown=true;
+                    updateMetadata();
+                }
                 const bool steppable=imageDocument() || animationReady();
                 transport_->setVisible(steppable); mute_->setVisible(false); play_->setVisible(animationReady());
                 previous_->setEnabled(steppable); next_->setEnabled(steppable);
@@ -328,7 +346,7 @@ void PlayerPanel::setFile(const VideoFileInfo* file, int index) {
     QString folder=file?QDir::toNativeSeparators(file->folderPath.empty()?QFileInfo(path).absolutePath():QString::fromStdWString(file->folderPath)):QString();
     name_->setFullText(fileName); pathLabel_->setFullText(folder);
     name_->setToolTip(path); pathLabel_->setToolTip(folder);
-    self_=file?PeerInfo{true,file->fileSize,file->duration100ns,file->width,file->height,file->codec}:PeerInfo{};
+    self_=file?PeerInfo{true,file->metadataLoaded,file->metadataLoaded && file->cachedDetailsVersion>=2,file->fileSize,file->duration100ns,file->width,file->height,file->captureTimeSec,file->codec}:PeerInfo{};
     if(!file) peer_={};
     updateMetadata();
     details_->setEnabled(file!=nullptr);
@@ -337,7 +355,7 @@ void PlayerPanel::setFile(const VideoFileInfo* file, int index) {
     refresh();
 }
 void PlayerPanel::setPeer(const VideoFileInfo* other) {
-    peer_=other && self_.valid?PeerInfo{true,other->fileSize,other->duration100ns,other->width,other->height,other->codec}:PeerInfo{};
+    peer_=other && self_.valid?PeerInfo{true,other->metadataLoaded,other->metadataLoaded && other->cachedDetailsVersion>=2,other->fileSize,other->duration100ns,other->width,other->height,other->captureTimeSec,other->codec}:PeerInfo{};
     updateMetadata();
 }
 void PlayerPanel::updateMetadata() {
@@ -350,9 +368,20 @@ void PlayerPanel::updateMetadata() {
     // Compare displayed values, so two files that both read "190.2 KB" are not flagged.
     const auto size=QString::fromStdWString(FormatBytesShort(self_.size));
     QStringList parts{part(size,compare && QString::fromStdWString(FormatBytesShort(peer_.size))!=size)};
-    if(!still_) parts<<part(duration(self_.duration),compare && duration(peer_.duration)!=duration(self_.duration));
-    parts<<part(QString("%1 × %2").arg(self_.width).arg(self_.height),compare && (peer_.width!=self_.width || peer_.height!=self_.height));
-    if(!self_.codec.empty()) parts<<part(QString::fromStdWString(self_.codec),compare && peer_.codec!=self_.codec);
+    if(!still_) {
+        const bool selfHasDur=self_.duration>0, peerHasDur=peer_.duration>0;
+        parts<<part(selfHasDur?duration(self_.duration):QString("—"),compare && selfHasDur && peerHasDur && duration(peer_.duration)!=duration(self_.duration));
+    }
+    const bool selfHasRes=self_.width>0 && self_.height>0, peerHasRes=peer_.width>0 && peer_.height>0;
+    parts<<part(selfHasRes?QString("%1 × %2").arg(self_.width).arg(self_.height):QString("—"),compare && selfHasRes && peerHasRes && (peer_.width!=self_.width || peer_.height!=self_.height));
+    if(!self_.codec.empty()) parts<<part(QString::fromStdWString(self_.codec),compare && !peer_.codec.empty() && peer_.codec!=self_.codec);
+    if(still_ && (self_.captureTimeSec>0 || (compare && peer_.captureTimeSec>0))) {
+        const bool selfKnown=self_.captureKnown || self_.captureTimeSec>0;
+        const bool peerKnown=peer_.captureKnown || peer_.captureTimeSec>0;
+        const QString selfTaken=self_.captureTimeSec>0?QDateTime::fromSecsSinceEpoch(self_.captureTimeSec,QTimeZone::UTC).toString("yyyy-MM-dd HH:mm"):(selfKnown?text("No EXIF date"):QString("—"));
+        const QString peerTaken=peer_.captureTimeSec>0?QDateTime::fromSecsSinceEpoch(peer_.captureTimeSec,QTimeZone::UTC).toString("yyyy-MM-dd HH:mm"):(peerKnown?text("No EXIF date"):QString("—"));
+        parts<<part(selfTaken,compare && selfKnown && peerKnown && peerTaken!=selfTaken);
+    }
     metadata_->setText(parts.join("&nbsp;&nbsp;&nbsp;·&nbsp;&nbsp;&nbsp;"));
     metadata_->setToolTip(compare?text("Highlighted values differ from the other file."):QString());
 }
@@ -387,7 +416,8 @@ void PlayerPanel::refresh() {
 }
 void PlayerPanel::showImageIndex(int index) {
     if(imageSequence_.playbackFrames.empty()) { canvas->setStillFrame({},true,true); return; }
-    index=std::clamp(index,0,int(imageSequence_.frameOrPageCount)-1);
+    const int maxIndex=imageDocument()?std::max(0,int(imageSequence_.frameOrPageCount)-1):(animationReady()?loadedAnimationFrames()-1:0);
+    index=std::clamp(index,0,maxIndex);
     if(imageDocument() && index!=0) {
         const auto revision=imageRevision_; auto watcher=new QFutureWatcher<QImage>(this);
         imageFrameIndex_=index;
@@ -404,18 +434,20 @@ void PlayerPanel::showImageIndex(int index) {
 }
 void PlayerPanel::seekImage(int64_t time) {
     if(!animationReady()) return;
-    imageTimeline_=std::max<int64_t>(0,time); imageTime_=imageTimeline_%imageDuration();
-    int64_t end=0; int index=0;
-    while(index<int(imageSequence_.frameDurations.size())-1 && (end+=imageSequence_.frameDurations[index])<=imageTime_) ++index;
+    const int64_t dur=std::max<int64_t>(1,imageDuration());
+    imageTimeline_=std::max<int64_t>(0,time); imageTime_=imageTimeline_%dur;
+    int64_t end=0; int index=0; const int limit=loadedAnimationFrames()-1;
+    while(index<limit && (end+=imageSequence_.frameDurations[size_t(index)])<=imageTime_) ++index;
     if(index!=imageFrameIndex_ || !canvas->frame()) showImageIndex(index);
     imageClock_.restart(); refresh();
 }
 void PlayerPanel::playImage(bool playing) { imagePlaying_=playing && animationReady() && !imageHidden_; imageClock_.restart(); refresh(); }
 void PlayerPanel::stepImage(bool forward) {
     playImage(false); if(!animationReady() && !imageDocument()) return;
-    const int index=std::clamp(imageFrameIndex_+(forward?1:-1),0,int(imageSequence_.frameOrPageCount)-1);
+    const int maxIndex=imageDocument()?std::max(0,int(imageSequence_.frameOrPageCount)-1):(loadedAnimationFrames()-1);
+    const int index=std::clamp(imageFrameIndex_+(forward?1:-1),0,maxIndex);
     if(imageDocument()) showImageIndex(index);
-    else { int64_t time=0; for(int i=0;i<index;++i) time+=imageSequence_.frameDurations[i]; seekImage(time); }
+    else { int64_t time=0; for(int i=0;i<index;++i) time+=imageSequence_.frameDurations[size_t(i)]; seekImage(time); }
     refresh();
 }
 void PlayerPanel::tickImage() {

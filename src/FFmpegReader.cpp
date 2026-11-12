@@ -173,7 +173,7 @@ bool FFmpegReader::Metadata(VideoFileInfo& file) const {
     int audio=av_find_best_stream(s.format,AVMEDIA_TYPE_AUDIO,-1,-1,nullptr,0); file.audioChannels=0;
     if(audio>=0) { const auto p=s.format->streams[audio]->codecpar; file.audioChannels=p->ch_layout.nb_channels; file.audioSampleRate=p->sample_rate; const auto name=avcodec_get_name(p->codec_id); file.audioCodec=std::wstring(name,name+strlen(name)); }
     if(file.duration100ns<0 || file.duration100ns>INT64_MAX/100 || s.origin<-(INT64_MAX/4) || s.origin>INT64_MAX/4) return false;
-    file.metadataLoaded=true; file.corrupted=false; file.error=S_OK;
+    file.metadataLoaded=true; file.corrupted=false; file.previewFailed=false; file.error=S_OK;
     return true;
 }
 bool FFmpegReader::HasAudio() const { return state_->audioIndex>=0; }
@@ -337,7 +337,7 @@ static bool ReadFFmpegSamplesImpl(VideoFileInfo& file,bool sampleVideo,std::atom
         file.samples.push_back(std::move(signature));
     }
     file.thumbBGRA=std::move(thumbnail);
-    file.frameLoaded=true; file.corrupted=false; file.error=S_OK; return true;
+    file.frameLoaded=true; file.corrupted=false; file.previewFailed=false; file.error=S_OK; return true;
 }
 bool ReadFFmpegSamples(VideoFileInfo& file,bool sampleVideo,std::atomic<bool>* cancel) {
     if(cancel && cancel->load()) return false;

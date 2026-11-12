@@ -42,14 +42,15 @@ QIcon thumbnailIcon(const VideoFileInfo& file,bool marked) {
 }
 
 void MainWindow::updateGroupRow(int groupIndex) {
-    if(groupIndex<0 || groupIndex>=static_cast<int>(groups_.size()) || groupIndex>=results_->topLevelItemCount()) return;
+    if(groupIndex<0 || groupIndex>=static_cast<int>(groups_.size())) return;
     auto& group=groups_[groupIndex];
     if(group.fileIndices.size()<2) return;
+    auto item=groupItem(groupIndex);
+    if(!item) return;
     group.leftSlot=0;
     group.rightSlot=std::clamp(group.rightSlot,1,static_cast<int>(group.fileIndices.size())-1);
     // A re-sort may move a marked file to slot 0; the mark stays because removal always keeps an unmarked match.
     for(int member:group.fileIndices) if(files_[member].protectedFile) markedFiles_.remove(member);
-    auto item=results_->topLevelItem(groupIndex);
     QSignalBlocker blocker(results_);
     const bool selectionChanged=item->data(0,Qt::UserRole+1).toInt()!=group.rightSlot;
     item->setData(0,Qt::UserRole,groupIndex);
@@ -67,7 +68,16 @@ void MainWindow::updateGroupRow(int groupIndex) {
 
 // Row geometry shared by painting, hit testing and the self-checks.
 QTreeWidgetItem* MainWindow::groupItem(int group) const {
-    return group>=0 && group<results_->topLevelItemCount()?results_->topLevelItem(group):nullptr;
+    if(!results_ || group<0) return nullptr;
+    if(group<results_->topLevelItemCount()) {
+        auto* direct=results_->topLevelItem(group);
+        if(direct && direct->data(0,Qt::UserRole).toInt()==group) return direct;
+    }
+    for(int i=0;i<results_->topLevelItemCount();++i) {
+        auto* item=results_->topLevelItem(i);
+        if(item && item->data(0,Qt::UserRole).toInt()==group) return item;
+    }
+    return nullptr;
 }
 QRect MainWindow::thumbnailRect(int group,int slot) const {
     auto item=groupItem(group); if(!item || slot<0 || slot>=int(groups_[group].fileIndices.size())) return {};
@@ -116,11 +126,13 @@ QStringList MainWindow::groupDetails(int groupIndex,int* proofOut) const {
     uint64_t bytes=0; int decided=0,marked=0;
     for(int slot=0;slot<int(group.fileIndices.size());++slot) {
         const int member=group.fileIndices[slot]; bytes+=files_[member].fileSize; if(markedFiles_.contains(member)) ++marked;
-        if(slot>0) if(auto found=reviewDecisions_.find(ReviewPairKey(files_[leftIdx].identity,files_[member].identity)); found!=reviewDecisions_.end() && found->second!=ReviewDecision::Unreviewed) ++decided;
+        if(slot>0 && pairDecision(leftIdx,member)!=ReviewDecision::Unreviewed) ++decided;
     }
     const int proof=proofLevel(group); if(proofOut) *proofOut=proof;
+    const QString matchLabel=proof==2?text("Exact copies"):proof==1?text("Includes exact copies"):
+        (group.bestFrameSim>0.0?text("Similar matches")+QString(" (%1%)").arg(group.bestFrameSim,0,'f',1):text("Similar matches"));
     QStringList parts{text("%1 files").arg(group.fileIndices.size()),QString::fromStdWString(FormatBytesShort(bytes)),
-        text(proof==2?"Exact copies":proof==1?"Includes exact copies":"Similar matches"),text("%1/%2 pairs reviewed").arg(decided).arg(group.fileIndices.size()-1)};
+        matchLabel,text("%1/%2 pairs reviewed").arg(decided).arg(group.fileIndices.size()-1)};
     if(marked) parts<<text("%1 marked for cleanup").arg(marked);
     return parts;
 }
@@ -132,8 +144,8 @@ MainWindow::ThumbnailView MainWindow::thumbnailView(int groupIndex,int slot) con
     view.caption=results_->fontMetrics().elidedText(QString::fromStdWString(file.fileName),Qt::ElideMiddle,ResultRow::cell-4);
     // The top-right badge shows a mark, or else protection; the bottom-right one the pair decision.
     if(markedFiles_.contains(index)) view.badges<<text("Marked for cleanup"); else if(file.protectedFile) view.badges<<text("Protected");
-    if(slot>0) if(auto found=reviewDecisions_.find(ReviewPairKey(files_[group.fileIndices[0]].identity,file.identity)); found!=reviewDecisions_.end() && found->second!=ReviewDecision::Unreviewed)
-        view.badges<<text(reviewLabels[int(found->second)]);
+    if(slot>0) if(const auto decision=pairDecision(group.fileIndices[0],index); decision!=ReviewDecision::Unreviewed)
+        view.badges<<text(reviewLabels[int(decision)]);
     return view;
 }
 QString MainWindow::thumbnailToolTip(int groupIndex,int slot) const {
@@ -142,8 +154,8 @@ QString MainWindow::thumbnailToolTip(int groupIndex,int slot) const {
     if(slot==0) states<<text("Reference · shown on the left"); else if(slot==group.rightSlot) states<<text("Compared candidate · shown on the right");
     if(markedFiles_.contains(index)) states<<text("Marked for cleanup");
     if(file.protectedFile) states<<text("Protected");
-    if(slot>0) if(auto found=reviewDecisions_.find(ReviewPairKey(files_[group.fileIndices[0]].identity,file.identity)); found!=reviewDecisions_.end() && found->second!=ReviewDecision::Unreviewed)
-        states<<text(reviewLabels[int(found->second)]);
+    if(slot>0) if(const auto decision=pairDecision(group.fileIndices[0],index); decision!=ReviewDecision::Unreviewed)
+        states<<text(reviewLabels[int(decision)]);
     return thumbnailTip(file)+(states.isEmpty()?QString():"\n"+states.join('\n'));
 }
 void MainWindow::paintGroupRow(QPainter* painter,const QStyleOptionViewItem& option,int groupIndex) const {
@@ -191,10 +203,11 @@ void MainWindow::paintGroupRow(QPainter* painter,const QStyleOptionViewItem& opt
         auto state=[&](Glyph glyph,const char* color,QPoint at) { const QRect rect(at,QSize(16,16)); badge(rect,QColor(color)); icon(glyph,dark).paint(painter,rect.adjusted(2,2,-3,-3)); };
         const QPoint topRight(cell.right()-19,cell.top()+4),bottomRight(cell.right()-19,cell.bottom()-19);
         if(marked) state(Glyph::Trash,"#e07a7a",topRight); else if(file.protectedFile) state(Glyph::Lock,"#d8c27a",topRight);
-        if(slot>0) if(auto found=reviewDecisions_.find(ReviewPairKey(files_[group.fileIndices[0]].identity,file.identity)); found!=reviewDecisions_.end()) {
-            if(found->second==ReviewDecision::Reviewed) state(Glyph::Check,"#8fd3a8",bottomRight);
-            else if(found->second==ReviewDecision::KeepBoth) state(Glyph::Files,"#8ab8e6",bottomRight);
-            else if(found->second==ReviewDecision::Later) state(Glyph::Clock,"#e6c26e",bottomRight);
+        if(slot>0) {
+            const auto decision=pairDecision(group.fileIndices[0],index);
+            if(decision==ReviewDecision::Reviewed) state(Glyph::Check,"#8fd3a8",bottomRight);
+            else if(decision==ReviewDecision::KeepBoth) state(Glyph::Files,"#8ab8e6",bottomRight);
+            else if(decision==ReviewDecision::Later) state(Glyph::Clock,"#e6c26e",bottomRight);
         }
         painter->setFont(option.font); painter->setPen(option.palette.color(QPalette::Text));
         const QRect name(cell.left(),cell.bottom()+1,ResultRow::cell,ResultRow::nameHeight);
@@ -241,6 +254,7 @@ void MainWindow::populateResults() {
     for(int i=0;i<static_cast<int>(groups_.size());++i) {
         if(groups_[i].fileIndices.size()<2) continue;
         auto item=new QTreeWidgetItem(results_);
+        item->setData(0,Qt::UserRole,i);
         updateGroupRow(i);
         if(i==currentGroup_) results_->setCurrentItem(item);
     }
@@ -260,23 +274,38 @@ void MainWindow::replaceGroupRows(int groupIndex,int insertedGroups) {
     reviewDirty_=true;
     const int scroll=results_->verticalScrollBar()->value();
     QSignalBlocker blocker(results_);
-    delete results_->takeTopLevelItem(groupIndex);
-    for(int i=0;i<insertedGroups;++i) { results_->insertTopLevelItem(groupIndex+i,new QTreeWidgetItem); updateGroupRow(groupIndex+i); }
-    renumberGroupRows(groupIndex+insertedGroups);
+    int insertRow=groupIndex;
+    if(auto existing=groupItem(groupIndex)) {
+        insertRow=results_->indexOfTopLevelItem(existing);
+        delete results_->takeTopLevelItem(insertRow);
+    }
+    insertRow=std::clamp(insertRow,0,results_->topLevelItemCount());
+    for(int i=0;i<insertedGroups;++i) {
+        auto item=new QTreeWidgetItem;
+        results_->insertTopLevelItem(insertRow+i,item);
+    }
+    renumberGroupRows(0);
+    for(int i=0;i<insertedGroups;++i) updateGroupRow(groupIndex+i);
     finishResultsUpdate(scroll);
 }
 void MainWindow::renumberGroupRows(int first) {
-    for(int i=std::max(0,first);i<results_->topLevelItemCount();++i) {
-        auto item=results_->topLevelItem(i); if(item->data(0,Qt::UserRole).toInt()==i) continue;
-        QSignalBlocker blocker(results_); item->setData(0,Qt::UserRole,i);
+    int row=0;
+    for(int g=0;g<static_cast<int>(groups_.size()) && row<results_->topLevelItemCount();++g) {
+        if(groups_[g].fileIndices.size()<2) continue;
+        if(row>=std::max(0,first)) {
+            auto item=results_->topLevelItem(row);
+            if(item->data(0,Qt::UserRole).toInt()!=g) {
+                QSignalBlocker blocker(results_); item->setData(0,Qt::UserRole,g);
+            }
+        }
+        ++row;
     }
     results_->viewport()->update();
 }
 
 void MainWindow::updateSpaceSummary() {
     auto key=[](const VideoFileInfo& file) {
-        return file.identity.valid ? QString::number(file.identity.volume)+":"+QString::number(file.identity.index)
-                                   : pathKey(QString::fromStdWString(file.fullPath));
+        return QString::fromStdWString(PhysicalFileKey(file));
     };
     QSet<QString> keepers,seen;
     bool exact=!groups_.empty();
@@ -300,7 +329,7 @@ void MainWindow::updateSpaceSummary() {
 void MainWindow::clearResults() {
     ++generation_; syncing_=false; pendingPreviews_.clear(); previewRuns_.clear(); requestedSamples_.clear(); markedFiles_.clear();
     left_->setFile(nullptr,-1); right_->setFile(nullptr,-1); right_->setCandidates(nullptr);
-    files_.clear(); groups_.clear(); scanIssues_.clear(); manual_=false; currentGroup_=-1; partialVerdict_.clear(); scanCompletedThisSession_=false;
+    files_.clear(); groups_.clear(); scanIssues_.clear(); scanMetrics_={}; manual_=false; currentGroup_=-1; partialVerdict_.clear(); scanCompletedThisSession_=false;
     populateResults(); updateSimilarity(); updateEmptyState();
 }
 
@@ -308,12 +337,14 @@ void MainWindow::applyFilter() {
     const auto value=filter_->text().trimmed();
     for(int i=0;i<results_->topLevelItemCount();++i) {
         auto item=results_->topLevelItem(i);
+        const int grp=item->data(0,Qt::UserRole).toInt();
         bool match=value.isEmpty() || item->toolTip(0).contains(value,Qt::CaseInsensitive);
-        const int proof=i<int(groups_.size())?proofLevel(groups_[i]):0;
+        const int proof=(grp>=0 && grp<int(groups_.size()))?proofLevel(groups_[grp]):0;
         const int choice=evidenceFilter_?evidenceFilter_->currentIndex():0;
         const bool evidenceMatch=choice==0 || (choice==1 && proof==2) || (choice==2 && proof>=1) || (choice==3 && proof!=2);
         item->setHidden(!match || !evidenceMatch);
     }
+    updateGroupNavigationActions();
     // An empty list must say why: a filter hides every group. Similar scans have no content hashes yet, so the
     // exact-copy filters stay empty until the results are verified.
     int visible=0; for(int i=0;i<results_->topLevelItemCount();++i) visible+=!results_->topLevelItem(i)->isHidden();
@@ -323,6 +354,34 @@ void MainWindow::applyFilter() {
         statusBar()->showMessage(unverified?text("No groups match this filter. Similar scans do not compare file contents; use Tools > Verify exact matches in results first."):text("No groups match this filter."));
     }
     QTimer::singleShot(0,this,[this] { requestVisiblePreviews(); });
+}
+
+int MainWindow::adjacentVisibleGroup(int fromGroup,int step) const {
+    if(!results_ || step==0 || groups_.empty()) return -1;
+    const int count=results_->topLevelItemCount();
+    if(step>0) {
+        for(int i=0;i<count;++i) {
+            auto* item=results_->topLevelItem(i);
+            if(!item || item->isHidden()) continue;
+            const int grp=item->data(0,Qt::UserRole).toInt();
+            if(grp>fromGroup && grp<static_cast<int>(groups_.size())) return grp;
+        }
+    } else {
+        for(int i=count-1;i>=0;--i) {
+            auto* item=results_->topLevelItem(i);
+            if(!item || item->isHidden()) continue;
+            const int grp=item->data(0,Qt::UserRole).toInt();
+            if(grp>=0 && grp<fromGroup && grp<static_cast<int>(groups_.size())) return grp;
+        }
+    }
+    return -1;
+}
+
+void MainWindow::updateGroupNavigationActions() {
+    if(!previousAction_ || !nextAction_) return;
+    const bool active=!scanning_ && !fileOperationPending_ && currentGroup_>=0 && currentGroup_<static_cast<int>(groups_.size());
+    previousAction_->setEnabled(active && adjacentVisibleGroup(currentGroup_,-1)>=0);
+    nextAction_->setEnabled(active && adjacentVisibleGroup(currentGroup_,1)>=0);
 }
 
 void MainWindow::requestVisiblePreviews() {
@@ -347,15 +406,16 @@ void MainWindow::selectGroup(int group,int comparison) {
     int targetRight=comparison>=1?comparison:selected.rightSlot;
     selected.leftSlot=0; selected.rightSlot=std::clamp(targetRight,1,static_cast<int>(selected.fileIndices.size())-1);
     syncing_=false; int left=selected.fileIndices[0], right=selected.fileIndices[selected.rightSlot];
+    selected.bestFrameSim=VideoScanner::ComputePairSimilarity(files_[left],files_[right],manual_?options_.matchTransforms:scanCriteria_.matchTransforms);
     if(left_->fileIndex!=left || right_->fileIndex!=right) { left_->playImage(false); right_->playImage(false); left_->seekImage(0); right_->seekImage(0); linkedStepFromRight_.reset(); lastControlledRight_=false; linkAction_->setChecked(true); linkAction_->setIcon(icon(Glyph::Link)); QSignalBlocker blocker(offset_); offset_->setValue(0); alignmentOffset100ns_=0; }
     left_->setFile(&files_[left],left); right_->setFile(&files_[right],right);
     left_->setCandidates(nullptr); right_->setCandidates(&selected);
     showGroupPosition();
-    previousAction_->setEnabled(group>0); nextAction_->setEnabled(group+1<static_cast<int>(groups_.size()));
-    auto item=results_->topLevelItem(group);
+    updateGroupNavigationActions();
+    auto item=groupItem(group);
     if(item && item->data(0,Qt::UserRole+1).toInt()!=selected.rightSlot) {
         updateGroupRow(group);
-        item=results_->topLevelItem(group);
+        item=groupItem(group);
     }
     if(item) {
         QSignalBlocker blocker(results_);
@@ -376,7 +436,7 @@ void MainWindow::requestPreview(int index) {
     bool sampleVideo=requestedSamples_.contains(index);
     const auto& info=files_[index];
     if((info.frameLoaded && !info.thumbBGRA.empty() && (!sampleVideo || info.samples.size()==5 || info.duration100ns<=0 || FAILED(info.error))) ||
-       info.corrupted || pendingPreviews_.contains(index) || pendingPreviews_.size()>=previewPool_.maxThreadCount()*2) return;
+       info.corrupted || (info.previewFailed && !sampleVideo) || pendingPreviews_.contains(index) || pendingPreviews_.size()>=previewPool_.maxThreadCount()*2) return;
     // One finished attempt per file and scan (one more if samples are wanted later): a file that yields no picture must not be decoded in a loop.
     if(auto run=previewRuns_.constFind(index); run!=previewRuns_.cend() && (*run || !sampleVideo)) return;
     pendingPreviews_.insert(index);
@@ -389,28 +449,46 @@ void MainWindow::requestPreview(int index) {
         pendingPreviews_.remove(index); previewRuns_.insert(index,sampleVideo);
         if(fileOperationPending_) return;
         if(index>=static_cast<int>(files_.size()) || files_[index].deleted || result.fullPath!=files_[index].fullPath || result.identity!=files_[index].identity) return;
-        result.protectedFile=files_[index].protectedFile; result.protectedByFolder=files_[index].protectedByFolder; files_[index]=std::move(result);
+        result.protectedFile=files_[index].protectedFile; result.protectedByFolder=files_[index].protectedByFolder;
+        if(files_[index].createdTime>0 && result.createdTime==0) result.createdTime=files_[index].createdTime;
+        if(result.contentHash.empty() && !files_[index].contentHash.empty()) result.contentHash=files_[index].contentHash;
+        files_[index]=std::move(result);
+        for(size_t g=0;g<groups_.size();++g) if(groups_[g].fileIndices.size()>=2) {
+            const int r=std::clamp(groups_[g].rightSlot,1,int(groups_[g].fileIndices.size())-1);
+            if(groups_[g].fileIndices[0]==index || groups_[g].fileIndices[r]==index) {
+                groups_[g].bestFrameSim=VideoScanner::ComputePairSimilarity(files_[groups_[g].fileIndices[0]],files_[groups_[g].fileIndices[r]],manual_?options_.matchTransforms:scanCriteria_.matchTransforms);
+            }
+        }
         if(left_->fileIndex==index) left_->setFile(&files_[index],index); if(right_->fileIndex==index) right_->setFile(&files_[index],index);
+        if(left_->fileIndex==index || right_->fileIndex==index) updatePeers();
         results_->viewport()->update(); // rows read files_ when painted
         updateSimilarity(); requestVisiblePreviews();
     });
     auto cachePath=cachePath_;
-    watcher->setFuture(QtConcurrent::run(&previewPool_,[file=std::move(file),cachePath,sampleVideo]() mutable {
+    const bool fromSavedSession=savedResultEvidence_;
+    watcher->setFuture(QtConcurrent::run(&previewPool_,[file=std::move(file),cachePath,sampleVideo,fromSavedSession]() mutable {
         Platform::ComInit com(Platform::ComApartment::MultiThreaded);
         try {
             auto identity=FileOperations::ReadIdentity(file.fullPath);
-            if(identity!=file.identity) { file.corrupted=true; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID); }
+            if(identity!=file.identity) { file.contentHash.clear(); file.corrupted=true; file.previewFailed=false; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID); }
             else {
-                if(StillImages::supported(file.fullPath)) { std::atomic<bool> cancel{false}; StillImages::analyze(file,cancel); }
+                const bool isStill=StillImages::supported(file.fullPath);
+                const bool hadCachedEvidence=!fromSavedSession && file.metadataLoaded && file.frameLoaded &&
+                    file.cachedDetailsVersion==2 && (isStill || !sampleVideo || file.samples.size()==5);
+                if(isStill) { std::atomic<bool> cancel{false}; StillImages::analyze(file,cancel); }
                 else {
                     // Cached evidence keeps signatures but not thumbnails, so a cached frameLoaded must not skip decoding the picture.
                     if(file.thumbBGRA.empty()) file.frameLoaded=false;
                     VideoScanner::ExtractMetadataOnly(file); VideoScanner::ExtractMetadataAndFrame(file,sampleVideo);
                 }
-                if(FileOperations::ReadIdentity(file.fullPath)!=identity) { file.corrupted=true; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID); }
-                else { ScanCache cache(cachePath); cache.store({file}); }
+                if(FileOperations::ReadIdentity(file.fullPath)!=identity) { file.contentHash.clear(); file.corrupted=true; file.previewFailed=false; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID); }
+                else if(!hadCachedEvidence && !cachePath.isEmpty()) { ScanCache cache(cachePath); cache.store({file},false); }
             }
-        } catch(...) { file.error=E_FAIL; file.corrupted=true; }
+        } catch(...) {
+            file.error=E_FAIL;
+            if(FileOperations::ReadIdentity(file.fullPath)!=file.identity) { file.contentHash.clear(); file.corrupted=true; file.previewFailed=false; }
+            else { file.previewFailed=true; file.corrupted=false; }
+        }
         return file;
     }));
 }

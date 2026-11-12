@@ -35,6 +35,8 @@ void MainWindow::fillReferenceRules() {
     if(!options_.images) referenceRule_->addItem(text("Longest duration"),int(ReferenceRule::LongestDuration));
     referenceRule_->addItem(text("Oldest file"),int(ReferenceRule::OldestFile));
     referenceRule_->addItem(text("Newest file"),int(ReferenceRule::NewestFile));
+    referenceRule_->addItem(text("Oldest creation date"),int(ReferenceRule::OldestCreated));
+    if(options_.images) referenceRule_->addItem(text("Oldest date taken (EXIF)"),int(ReferenceRule::OldestCaptureDate));
     referenceRule_->addItem(text("First by name"),int(ReferenceRule::NameOrder));
     const int found=current.isValid()?referenceRule_->findData(current):-1; referenceRule_->setCurrentIndex(found>=0?found:0);
     referenceRule_->setAccessibleName(text("Reference file in each group"));
@@ -46,10 +48,14 @@ void MainWindow::applyReferenceRule() {
     const auto rule=static_cast<ReferenceRule>(referenceRule_->currentData().toInt());
     settings_.setValue("referenceRule",int(rule));
     if(scanning_ || sortingMetadata_ || fileOperationPending_ || closing_ || groups_.empty()) return;
-    // Identical content has identical resolution and duration, so only mixed groups need their metadata read first.
-    if(rule==ReferenceRule::HighestResolution || rule==ReferenceRule::LongestDuration)
+    // Identical content has identical resolution, duration and EXIF bytes, so only mixed groups need their metadata read first.
+    if(rule==ReferenceRule::HighestResolution || rule==ReferenceRule::LongestDuration || rule==ReferenceRule::OldestCaptureDate)
         for(const auto& group:groups_) if(!group.manualReference && proofLevel(group)!=2)
-            for(int i:group.fileIndices) if(!files_[i].metadataLoaded && !files_[i].corrupted && !files_[i].deleted) { leftOnlySorting_=true; sortResults(); return; }
+            for(int i:group.fileIndices) if((!files_[i].metadataLoaded || (rule==ReferenceRule::OldestCaptureDate && StillImages::supported(files_[i].fullPath) && files_[i].cachedDetailsVersion<2)) && !files_[i].corrupted && !files_[i].previewFailed && !files_[i].deleted) { leftOnlySorting_=true; sortResults(); return; }
+    if(rule==ReferenceRule::OldestCreated || rule==ReferenceRule::OldestCaptureDate)
+        for(const auto& group:groups_) if(!group.manualReference)
+            for(int i:group.fileIndices) if(files_[i].createdTime==0 && files_[i].identity.valid && !files_[i].deleted)
+                files_[i].createdTime=Platform::ReadFileCreationTime(files_[i].fullPath);
     auto before=[&](int a,int b) {
         const auto& x=files_[a]; const auto& y=files_[b];
         if(x.protectedFile!=y.protectedFile) return x.protectedFile;
@@ -58,22 +64,59 @@ void MainWindow::applyReferenceRule() {
         case ReferenceRule::LongestDuration: if(x.duration100ns!=y.duration100ns) return x.duration100ns>y.duration100ns; break;
         case ReferenceRule::OldestFile: if(x.identity.modified!=y.identity.modified) return x.identity.modified<y.identity.modified; break;
         case ReferenceRule::NewestFile: if(x.identity.modified!=y.identity.modified) return x.identity.modified>y.identity.modified; break;
+        case ReferenceRule::OldestCreated: {
+            const uint64_t ca=x.createdTime?x.createdTime:x.identity.modified;
+            const uint64_t cb=y.createdTime?y.createdTime:y.identity.modified;
+            if(ca!=cb) return ca<cb;
+            break;
+        }
+        case ReferenceRule::OldestCaptureDate: {
+            if((x.captureTimeSec>0)!=(y.captureTimeSec>0)) return x.captureTimeSec>0;
+            if(x.captureTimeSec>0 && x.captureTimeSec!=y.captureTimeSec) return x.captureTimeSec<y.captureTimeSec;
+            const uint64_t ca=x.createdTime?x.createdTime:x.identity.modified;
+            const uint64_t cb=y.createdTime?y.createdTime:y.identity.modified;
+            if(ca!=cb) return ca<cb;
+            break;
+        }
         case ReferenceRule::NameOrder: if(const int order=QString::fromStdWString(x.fileName).localeAwareCompare(QString::fromStdWString(y.fileName))) return order<0; break;
         case ReferenceRule::LargestFile: break;
         }
         if(x.fileSize!=y.fileSize) return x.fileSize>y.fileSize;
         return x.fullPath<y.fullPath;
     };
-    const auto scroll=results_->verticalScrollBar()->value(); const int active=currentGroup_;
+    const auto scroll=results_->verticalScrollBar()->value();
+    const auto activeMembers=(currentGroup_>=0 && currentGroup_<int(groups_.size()))?groups_[currentGroup_].fileIndices:std::vector<int>{};
+    int active=currentGroup_;
     for(auto& group:groups_) {
-        if(group.manualReference) continue;
-        const int right=group.fileIndices.size()>size_t(group.rightSlot)?group.fileIndices[group.rightSlot]:-1;
-        std::stable_sort(group.fileIndices.begin(),group.fileIndices.end(),before);
-        // The rule's favourite becomes the reference only if it can anchor the group; otherwise the best eligible file does.
-        if(auto eligible=std::find_if(group.fileIndices.begin(),group.fileIndices.end(),[&](int member) { return canBeReference(group,member) && matchesWholeGroup(group,member); }); eligible!=group.fileIndices.end())
-            std::rotate(group.fileIndices.begin(),eligible,eligible+1);
-        group.leftSlot=0; auto found=std::find(group.fileIndices.begin()+std::min<size_t>(1,group.fileIndices.size()),group.fileIndices.end(),right);
-        group.rightSlot=found!=group.fileIndices.end()?int(found-group.fileIndices.begin()):1;
+        if(!group.manualReference) {
+            const int right=group.fileIndices.size()>size_t(group.rightSlot)?group.fileIndices[group.rightSlot]:-1;
+            std::stable_sort(group.fileIndices.begin(),group.fileIndices.end(),before);
+            // The rule's favourite becomes the reference only if it can anchor the group; otherwise the best eligible file does.
+            if(auto eligible=std::find_if(group.fileIndices.begin(),group.fileIndices.end(),[&](int member) { return canBeReference(group,member) && matchesWholeGroup(group,member); }); eligible!=group.fileIndices.end())
+                std::rotate(group.fileIndices.begin(),eligible,eligible+1);
+            group.leftSlot=0; auto found=std::find(group.fileIndices.begin()+std::min<size_t>(1,group.fileIndices.size()),group.fileIndices.end(),right);
+            group.rightSlot=found!=group.fileIndices.end()?int(found-group.fileIndices.begin()):1;
+        }
+        group.bestFrameSim=group.fileIndices.size()>=2?VideoScanner::ComputePairSimilarity(files_[group.fileIndices[0]],files_[group.fileIndices[group.rightSlot]],manual_?options_.matchTransforms:scanCriteria_.matchTransforms):0.0;
+    }
+    if(options_.sortOrder==SortOrder::SimilarityDesc || options_.sortOrder==SortOrder::SimilarityAsc) {
+        const bool desc=options_.sortOrder==SortOrder::SimilarityDesc;
+        auto simRank=[](double s)->int64_t { return std::isfinite(s)?std::llround(std::clamp(s,0.0,100.0)*10000.0):-1; };
+        std::stable_sort(groups_.begin(),groups_.end(),[&](const VideoGroup& ga,const VideoGroup& gb) {
+            if(ga.fileIndices.empty() || gb.fileIndices.empty()) return ga.fileIndices.size()>gb.fileIndices.size();
+            const bool exactA=proofLevel(ga)==2, exactB=proofLevel(gb)==2;
+            if(exactA!=exactB) return desc?exactA:!exactA;
+            const int64_t rankA=simRank(ga.bestFrameSim), rankB=simRank(gb.bestFrameSim);
+            if(rankA!=rankB) return desc?(rankA>rankB):(rankA<rankB);
+            const auto& a=files_[ga.fileIndices[0]]; const auto& b=files_[gb.fileIndices[0]];
+            if(a.protectedFile!=b.protectedFile) return a.protectedFile;
+            if(a.fileSize!=b.fileSize) return a.fileSize>b.fileSize;
+            return a.fullPath<b.fullPath;
+        });
+        if(!activeMembers.empty()) {
+            auto sameSet=[](std::vector<int> u,std::vector<int> v) { std::sort(u.begin(),u.end()); std::sort(v.begin(),v.end()); return u==v; };
+            for(size_t g=0;g<groups_.size();++g) if(sameSet(groups_[g].fileIndices,activeMembers)) { active=int(g); break; }
+        }
     }
     populateResults(); if(active>=0 && active<int(groups_.size())) selectGroup(active,groups_[active].rightSlot);
     results_->verticalScrollBar()->setValue(scroll);
@@ -97,18 +140,29 @@ void MainWindow::makeReference(int groupIndex,int slot) {
     if(!canBeReference(group,group.fileIndices[slot])) { statusBar()->showMessage(text("Cross-folder results compare against another folder, so the reference must be the only file from its folder in this group.")); return; }
     std::rotate(group.fileIndices.begin(),group.fileIndices.begin()+slot,group.fileIndices.begin()+slot+1);
     group.manualReference=true; group.leftSlot=0; group.rightSlot=1; reviewDirty_=true;
+    group.bestFrameSim=group.fileIndices.size()>=2?VideoScanner::ComputePairSimilarity(files_[group.fileIndices[0]],files_[group.fileIndices[group.rightSlot]],manual_?options_.matchTransforms:scanCriteria_.matchTransforms):0.0;
     updateGroupRow(groupIndex); selectGroup(groupIndex,1);
     statusBar()->showMessage(text("Reference set for this group: %1").arg(QString::fromStdWString(files_[group.fileIndices[0]].fileName)));
 }
 void MainWindow::sortResults() {
     if(sortingMetadata_ || closing_ || scanning_ || fileOperationPending_) return;
-    bool needMeta=leftOnlySorting_ || (options_.sortOrder==SortOrder::DurationDesc || options_.sortOrder==SortOrder::DurationAsc || options_.sortOrder==SortOrder::ResolutionDesc || options_.sortOrder==SortOrder::ResolutionAsc);
+    const bool needSim=!leftOnlySorting_ && (options_.sortOrder==SortOrder::SimilarityDesc || options_.sortOrder==SortOrder::SimilarityAsc);
+    const bool needMeta=leftOnlySorting_ || (options_.sortOrder==SortOrder::DurationDesc || options_.sortOrder==SortOrder::DurationAsc || options_.sortOrder==SortOrder::ResolutionDesc || options_.sortOrder==SortOrder::ResolutionAsc);
     std::vector<std::pair<int,VideoFileInfo>> missing;
-    if(needMeta) {
+    if(needMeta || needSim) {
+        const bool needCaptureDate=leftOnlySorting_ && referenceRule_ && referenceRule_->currentData().toInt()==int(ReferenceRule::OldestCaptureDate);
         QSet<int> seen;
-        for(const auto& group:groups_) for(int idx:group.fileIndices) {
-            if(!seen.contains(idx) && !files_[idx].deleted && !files_[idx].metadataLoaded) {
-                seen.insert(idx); missing.emplace_back(idx,files_[idx]);
+        for(const auto& group:groups_) {
+            if(needSim && !needMeta && proofLevel(group)==2) continue;
+            for(int idx:group.fileIndices) {
+                if(seen.contains(idx) || files_[idx].deleted || files_[idx].corrupted || files_[idx].previewFailed) continue;
+                const bool lacksMeta=needMeta && (!files_[idx].metadataLoaded || (needCaptureDate && StillImages::supported(files_[idx].fullPath) && files_[idx].cachedDetailsVersion<2));
+                const bool lacksSim=needSim && (options_.images
+                    ? !files_[idx].frameLoaded
+                    : (files_[idx].samples.size()!=5 && (!files_[idx].metadataLoaded || files_[idx].duration100ns>0) && !previewRuns_.value(idx,false)));
+                if(lacksMeta || lacksSim) {
+                    seen.insert(idx); missing.emplace_back(idx,files_[idx]);
+                }
             }
         }
     }
@@ -116,18 +170,19 @@ void MainWindow::sortResults() {
         cancel_.store(false);
         sortingMetadata_=true;
         centralWidget()->setEnabled(false); menuBar()->setEnabled(false);
-        progress_->setRange(0,0); progress_->show(); statusBar()->showMessage(text("Reading video information for sorting…"));
+        progress_->setRange(0,0); progress_->show(); statusBar()->showMessage(text(options_.images?"Reading image information for sorting…":"Reading video information for sorting…"));
         auto watcher=new QFutureWatcher<std::vector<std::pair<int,VideoFileInfo>>>(this);
         auto generation=generation_;
-        connect(watcher,&QFutureWatcherBase::finished,this,[this,watcher,generation] {
+        connect(watcher,&QFutureWatcherBase::finished,this,[this,watcher,generation,needSim] {
             auto result=watcher->result(); watcher->deleteLater(); sortingMetadata_=false;
             if(pendingClose_) { close(); return; }
             if(closing_ || generation!=generation_) return;
+            if(needSim) for(const auto& [idx,_]:result) previewRuns_.insert(idx,true);
             mergeMetadata(result);
             centralWidget()->setEnabled(true); menuBar()->setEnabled(true); progress_->hide();
             sortResults(); statusBar()->showMessage(text("Ready"));
         });
-        watcher->setFuture(QtConcurrent::run(&previewPool_,[this,missing=std::move(missing)]() mutable { readMetadata(missing,cancel_); return missing; }));
+        watcher->setFuture(QtConcurrent::run(&previewPool_,[this,missing=std::move(missing),needSim]() mutable { readMetadata(missing,cancel_,nullptr,needSim); return missing; }));
         return;
     }
     if(leftOnlySorting_) { leftOnlySorting_=false; if(!cancel_.load()) applyReferenceRule(); return; }
@@ -146,19 +201,31 @@ void MainWindow::sortResults() {
     populateResults(); if(!groups_.empty()) selectGroup(0,1); applyReferenceRule(); saveSettings();
 }
 // Worker side of a metadata read: identity is checked before and after, so a changed file is never trusted.
-void MainWindow::readMetadata(std::vector<std::pair<int,VideoFileInfo>>& missing,std::atomic<bool>& cancel,std::atomic<int>* done) {
+void MainWindow::readMetadata(std::vector<std::pair<int,VideoFileInfo>>& missing,std::atomic<bool>& cancel,std::atomic<int>* done,bool sampleVideos) {
     Platform::ComInit com(Platform::ComApartment::MultiThreaded);
+    std::vector<VideoFileInfo> cacheable;
     for(auto& [index,file]:missing) {
         if(cancel.load()) break;
         if(FileOperations::ReadIdentity(file.fullPath)!=file.identity) {
-            file.metadataLoaded=true; file.corrupted=true; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+            file.contentHash.clear(); file.metadataLoaded=true; file.corrupted=true; file.previewFailed=false; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
         } else {
-            if(StillImages::supported(file.fullPath)) StillImages::analyze(file,cancel); else VideoScanner::ExtractMetadataOnly(file);
+            if(file.createdTime==0) file.createdTime=Platform::ReadFileCreationTime(file.fullPath);
+            if(StillImages::supported(file.fullPath)) {
+                if((file.frameLoaded || (!sampleVideos && file.metadataLoaded)) && file.width>0 && file.height>0 && file.cachedDetailsVersion<2) StillImages::refreshCaptureTime(file,cancel);
+                else StillImages::analyze(file,cancel);
+            } else if(sampleVideos) { VideoScanner::ExtractMetadataOnly(file,&cancel); VideoScanner::ExtractMetadataAndFrame(file,true,&cancel); }
+            else VideoScanner::ExtractMetadataOnly(file,&cancel);
             if(FileOperations::ReadIdentity(file.fullPath)!=file.identity) {
-                file.corrupted=true; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+                file.contentHash.clear(); file.corrupted=true; file.previewFailed=false; file.error=HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
+            } else if((sampleVideos || file.metadataLoaded) && !cancel.load()) {
+                cacheable.push_back(file);
             }
         }
         if(done) ++*done;
+    }
+    if(!cacheable.empty() && !cachePath_.isEmpty()) {
+        ScanCache cache(cachePath_);
+        cache.store(cacheable);
     }
 }
 void MainWindow::mergeMetadata(std::vector<std::pair<int,VideoFileInfo>>& result) {
@@ -167,9 +234,20 @@ void MainWindow::mergeMetadata(std::vector<std::pair<int,VideoFileInfo>>& result
         if(file.deleted || file.identity!=metadata.identity || file.fullPath!=metadata.fullPath) continue;
         // Previews may finish meanwhile; retain their pixels and signatures.
         file.duration100ns=metadata.duration100ns; file.width=metadata.width; file.height=metadata.height;
+        if(metadata.createdTime>0) file.createdTime=metadata.createdTime;
+        if(metadata.cachedDetailsVersion>=2 || metadata.captureTimeSec>0) file.captureTimeSec=metadata.captureTimeSec;
         file.videoBitrate=metadata.videoBitrate; file.audioChannels=metadata.audioChannels; file.audioSampleRate=metadata.audioSampleRate; file.audioCodec=metadata.audioCodec;
         file.fps=metadata.fps; file.codec=std::move(metadata.codec); file.metadataLoaded=metadata.metadataLoaded;
-        if(metadata.corrupted) { file.corrupted=true; file.error=metadata.error; }
+        if(metadata.metadataLoaded) { file.cachedDetailsVersion=metadata.cachedDetailsVersion; file.cachedImageRenderVersion=metadata.cachedImageRenderVersion; }
+        if(metadata.frameLoaded && !file.frameLoaded) {
+            file.sigFirst=metadata.sigFirst; file.sigAlt=metadata.sigAlt; file.frameLoaded=true;
+            file.imageKind=metadata.imageKind; file.imageFrameCount=metadata.imageFrameCount;
+            file.cachedDetailsVersion=metadata.cachedDetailsVersion; file.cachedImageRenderVersion=metadata.cachedImageRenderVersion;
+            if(file.thumbBGRA.empty()) file.thumbBGRA=std::move(metadata.thumbBGRA);
+        }
+        if(metadata.samples.size()==5 && file.samples.size()!=5) file.samples=std::move(metadata.samples);
+        if(metadata.corrupted) { file.contentHash.clear(); file.corrupted=true; file.previewFailed=false; file.error=metadata.error; }
+        else if(metadata.previewFailed) { file.previewFailed=true; file.error=metadata.error; }
     }
 }
 
@@ -223,6 +301,10 @@ void MainWindow::verifyResultHashes() {
             const auto& verified=*found->second;
             if(FAILED(verified.error)) f.contentHash.clear();
             else if(!verified.contentHash.empty()) { f.contentHash=verified.contentHash; ++checked; }
+        }
+        for(auto& g:groups_) if(g.fileIndices.size()>=2) {
+            const int r=std::clamp(g.rightSlot,1,int(g.fileIndices.size())-1);
+            g.bestFrameSim=VideoScanner::ComputePairSimilarity(files_[g.fileIndices[0]],files_[g.fileIndices[r]],manual_?options_.matchTransforms:scanCriteria_.matchTransforms);
         }
         populateResults(); updateSimilarity(); statusBar()->showMessage(text("%1 files SHA-checked; other results remain review candidates.").arg(checked));
     });
@@ -309,7 +391,9 @@ void MainWindow::updateSimilarity() {
                 break;
             }
         } else {
-            requestPreview(left); requestPreview(right); setVerdict(text(a.corrupted || b.corrupted?"Visual similarity unavailable":"Measuring visual similarity…"),"none");
+            if(!a.previewFailed) requestPreview(left);
+            if(!b.previewFailed) requestPreview(right);
+            setVerdict(text(a.corrupted || b.corrupted || a.previewFailed || b.previewFailed?"Visual similarity unavailable":"Measuring visual similarity…"),"none");
         }
         return;
     }
@@ -324,7 +408,7 @@ void MainWindow::updateSimilarity() {
     bool pending=false;
     if(!scanning_ && !closing_ && !fileOperationPending_) for(int index:{left,right}) {
         const auto& file=files_[index];
-        if(file.samples.size()!=5 && !file.corrupted && SUCCEEDED(file.error) && (!file.metadataLoaded || file.duration100ns>0)) {
+        if(file.samples.size()!=5 && !file.corrupted && !file.previewFailed && SUCCEEDED(file.error) && (!file.metadataLoaded || file.duration100ns>0)) {
             requestedSamples_.insert(index); requestPreview(index); pending=true;
         }
     }
@@ -357,7 +441,7 @@ void MainWindow::advanceToNextPair() {
     if(scanning_ || fileOperationPending_ || currentGroup_<0 || currentGroup_>=int(groups_.size())) return;
     const auto& group=groups_[currentGroup_];
     if(group.rightSlot+1<int(group.fileIndices.size())) { selectGroup(currentGroup_,group.rightSlot+1); return; }
-    for(int next=currentGroup_+1;next<int(groups_.size());++next) if(next>=results_->topLevelItemCount() || !results_->topLevelItem(next)->isHidden()) { selectGroup(next,1); return; }
+    if(const int next=adjacentVisibleGroup(currentGroup_,1); next>=0) { selectGroup(next,1); return; }
     statusBar()->showMessage(text("This was the last pair."));
 }
 
@@ -381,20 +465,24 @@ void MainWindow::refreshReviewDecisions() {
     }
 }
 bool MainWindow::protectedByReview(const VideoFileInfo& file) const {
-    const auto pair=ReviewPairKey(file.identity,file.identity);
-    return !pair.empty() && deferredReviewFiles_.contains(pair.substr(0,pair.find('/')));
+    const auto id=FileReviewId(file);
+    if(!id.empty() && deferredReviewFiles_.contains(id)) return true;
+    const auto legacy=FileReviewId(file.identity);
+    return !legacy.empty() && deferredReviewFiles_.contains(legacy);
+}
+ReviewDecision MainWindow::pairDecision(int a,int b) const {
+    if(a<0 || b<0 || a>=int(files_.size()) || b>=int(files_.size())) return ReviewDecision::Unreviewed;
+    if(auto found=reviewDecisions_.find(ReviewPairKey(files_[a],files_[b])); found!=reviewDecisions_.end()) return found->second;
+    const auto legacy=reviewDecisions_.find(ReviewPairKey(files_[a].identity,files_[b].identity));
+    return legacy==reviewDecisions_.end()?ReviewDecision::Unreviewed:legacy->second;
 }
 ReviewDecision MainWindow::currentReviewDecision() const {
-    const auto a=left_->fileIndex,b=right_->fileIndex;
-    if(a<0 || b<0 || a>=int(files_.size()) || b>=int(files_.size())) return ReviewDecision::Unreviewed;
-    const auto found=reviewDecisions_.find(ReviewPairKey(files_[a].identity,files_[b].identity));
-    return found==reviewDecisions_.end()?ReviewDecision::Unreviewed:found->second;
+    return pairDecision(left_->fileIndex,right_->fileIndex);
 }
 void MainWindow::updateReviewState() {
     const auto a=left_->fileIndex,b=right_->fileIndex;
     const bool active=!scanning_ && !fileOperationPending_ && !closing_ && a>=0 && b>=0 && a<int(files_.size()) && b<int(files_.size());
-    auto decision=ReviewDecision::Unreviewed;
-    if(active) if(auto found=reviewDecisions_.find(ReviewPairKey(files_[a].identity,files_[b].identity)); found!=reviewDecisions_.end()) decision=found->second;
+    auto decision=active?currentReviewDecision():ReviewDecision::Unreviewed;
     for(int i=1;i<4;++i) {
         reviewActions_[i]->setEnabled(active); reviewActions_[i]->setChecked(i==int(decision));
         reviewActions_[i]->setToolTip(i==int(decision)?text("Click again to clear the decision."):QString());
@@ -426,8 +514,8 @@ void MainWindow::setReviewDecision(ReviewDecision decision) {
     if(FileOperations::ReadIdentity(a.fullPath)!=a.identity || FileOperations::ReadIdentity(b.fullPath)!=b.identity) {
         statusBar()->showMessage(text("This file changed or is no longer available. Rescan before removing it.")); return;
     }
-    ScanCache cache(cachePath_); cache.saveReviewDecisions({{ReviewPairKey(a.identity,b.identity),decision}});
-    if(!cache.error().isEmpty()) { QMessageBox::warning(this,text("Review decision"),cache.error()); return; }
+    ScanCache cache(cachePath_); cache.saveReviewDecisions({{ReviewPairKey(a,b),decision}});
+    if(!cache.error().isEmpty()) { plainWarning(this,text("Review decision"),cache.error()); return; }
     refreshReviewDecisions();
     // A keep or review-later decision protects both files, so cleanup marks on them would only be skipped later.
     for(auto it=markedFiles_.begin();it!=markedFiles_.end();) { if(protectedByReview(files_[*it])) it=markedFiles_.erase(it); else ++it; }
@@ -439,7 +527,7 @@ void MainWindow::ignoreCurrentPair() {
     if(scanning_ || sortingMetadata_ || fileOperationPending_ || clearingCache_ || closing_ || left_->fileIndex<0 || right_->fileIndex<0) return;
     ScanCache cache(cachePath_); cache.ignorePair(files_[left_->fileIndex],files_[right_->fileIndex]);
     if(cache.error().isEmpty()) scanCriteria_.ignoredPairs=cache.ignoredPairs();
-    if(!cache.error().isEmpty()) { QMessageBox::warning(this,text("Scan report"),cache.error()); return; }
+    if(!cache.error().isEmpty()) { plainWarning(this,text("Scan report"),cache.error()); return; }
     if(manual_) { groups_.clear(); currentGroup_=-1; left_->setFile(nullptr,-1); right_->setFile(nullptr,-1); populateResults(); return; }
     if(currentGroup_<0 || currentGroup_>=int(groups_.size())) return;
     // Regroup only the affected group in memory; a rescan would discard cleanup marks and the review position.

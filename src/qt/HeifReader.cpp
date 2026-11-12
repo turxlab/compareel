@@ -1,6 +1,8 @@
 #include "HeifReader.h"
+#include "ImageReaderInternal.h"
 #include <QColorSpace>
 #include <QPainter>
+#include <QtEndian>
 #include <libheif/heif.h>
 #include <libheif/heif_sequences.h>
 #include <map>
@@ -11,6 +13,45 @@ namespace StillImages {
 namespace {
 
 QImage compositeToWhiteSRgb(QImage image) { return flattenTransparency(std::move(image)); }
+
+int64_t extractHeifCaptureTimeSec(heif_image_handle* handle) {
+    if (!handle) return 0;
+    heif_item_id exifId = 0;
+    if (heif_image_handle_get_list_of_metadata_block_IDs(handle, "Exif", &exifId, 1) != 1) return 0;
+    const size_t exifSize = heif_image_handle_get_metadata_size(handle, exifId);
+    if (exifSize <= 10 || exifSize > 1024 * 1024) return 0;
+    QByteArray meta(qsizetype(exifSize), Qt::Uninitialized);
+    if (heif_image_handle_get_metadata(handle, exifId, meta.data()).code != heif_error_Ok) return 0;
+    const quint32 tiffOffset = qFromBigEndian<quint32>(meta.constData());
+    if (4ULL + uint64_t(tiffOffset) >= uint64_t(meta.size())) return 0;
+    return Internal::exifCaptureTimeSec(meta.mid(4 + qsizetype(tiffOffset)));
+}
+
+bool appendBoundedHeifPlaybackFrame(std::vector<QImage>& frames, QImage frame, uint64_t& storedPixels, QSize& maxDim) {
+    constexpr uint64_t kMaxPlaybackPixels = 96ULL * 1024 * 1024;
+    auto fitToMax = [](const QImage& img, const QSize& limit) -> QImage {
+        if (img.width() <= limit.width() && img.height() <= limit.height()) return img;
+        return img.scaled(limit, Qt::KeepAspectRatio, Qt::SmoothTransformation);
+    };
+    frame = fitToMax(frame, maxDim);
+    if (frame.isNull()) return false;
+    while (storedPixels + uint64_t(frame.width()) * frame.height() > kMaxPlaybackPixels &&
+           maxDim.width() > 320 && maxDim.height() > 180) {
+        maxDim = QSize(std::max(320, maxDim.width() / 2), std::max(180, maxDim.height() / 2));
+        storedPixels = 0;
+        for (auto& existing : frames) {
+            existing = fitToMax(existing, maxDim);
+            storedPixels += uint64_t(existing.width()) * existing.height();
+        }
+        frame = fitToMax(frame, maxDim);
+    }
+    if (!frames.empty() && storedPixels + uint64_t(frame.width()) * frame.height() > kMaxPlaybackPixels) {
+        return false;
+    }
+    storedPixels += uint64_t(frame.width()) * frame.height();
+    frames.push_back(std::move(frame));
+    return true;
+}
 
 enum class HdrTransfer { None, Pq, Hlg };
 
@@ -180,13 +221,59 @@ std::vector<size_t> selectTemporalSampleIndices(const std::vector<int64_t>& dura
     return indices;
 }
 
-} // namespace
-
-QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteArray& format, ImageExtendedInfo* ext) {
+bool ensureHeifRuntime() {
     struct Runtime { bool ready = heif_init(nullptr).code == heif_error_Ok; ~Runtime() { if (ready) heif_deinit(); } };
     static Runtime runtime;
+    return runtime.ready;
+}
+
+} // namespace
+
+int64_t readHeifCaptureTimeSec(QFile& input, std::atomic<bool>& cancel) {
+    if (!ensureHeifRuntime() || cancel.load()) return 0;
+    if (input.size() > 256LL * 1024 * 1024 || !input.seek(0)) return 0;
+    const auto bytes = input.readAll();
+    if (bytes.size() != input.size() || bytes.isEmpty()) return 0;
+    const QByteArray mime = heif_get_file_mime_type(reinterpret_cast<const uint8_t*>(bytes.constData()), bytes.size());
+    if (mime != "image/heic" && mime != "image/heif" && mime != "image/avif" &&
+        mime != "image/heic-sequence" && mime != "image/heif-sequence" && mime != "image/avif-sequence") {
+        return 0;
+    }
+    std::unique_ptr<heif_context, decltype(&heif_context_free)> context(heif_context_alloc(), heif_context_free);
+    if (!context) return 0;
+    auto limits = *heif_get_global_security_limits();
+    limits.max_image_size_pixels = 67108864;
+    limits.max_number_of_tiles = 1024;
+    limits.max_items = 4096;
+    limits.max_memory_block_size = 256ULL * 1024 * 1024;
+    limits.max_total_memory = 512ULL * 1024 * 1024;
+    limits.max_color_profile_size = 1024 * 1024;
+    limits.max_sequence_frames = 65535;
+    if (heif_context_set_security_limits(context.get(), &limits).code != heif_error_Ok) return 0;
+    heif_context_set_max_decoding_threads(context.get(), 0);
+    if (heif_context_read_from_memory_without_copy(context.get(), bytes.constData(), bytes.size(), nullptr).code != heif_error_Ok) return 0;
+    if (heif_context_number_of_sequence_tracks(context.get()) > 0) return 0;
+    const int numTopImages = heif_context_get_number_of_top_level_images(context.get());
+    if (numTopImages == 1) {
+        heif_image_handle* rawH = nullptr;
+        if (heif_context_get_primary_image_handle(context.get(), &rawH).code != heif_error_Ok) return 0;
+        std::unique_ptr<heif_image_handle, decltype(&heif_image_handle_release)> h(rawH, heif_image_handle_release);
+        return extractHeifCaptureTimeSec(h.get());
+    }
+    if (numTopImages > 1 && numTopImages <= 256) {
+        heif_item_id firstId = 0;
+        if (heif_context_get_list_of_top_level_image_IDs(context.get(), &firstId, 1) < 1) return 0;
+        heif_image_handle* rawH = nullptr;
+        if (heif_context_get_image_handle(context.get(), firstId, &rawH).code != heif_error_Ok) return 0;
+        std::unique_ptr<heif_image_handle, decltype(&heif_image_handle_release)> h(rawH, heif_image_handle_release);
+        return extractHeifCaptureTimeSec(h.get());
+    }
+    return 0;
+}
+
+QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteArray& format, ImageExtendedInfo* ext) {
     error = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
-    if (!runtime.ready) { error = E_FAIL; return {}; }
+    if (!ensureHeifRuntime()) { error = E_FAIL; return {}; }
     if (cancel.load()) { error = HRESULT_FROM_WIN32(ERROR_CANCELLED); return {}; }
     if (input.size() > 256LL * 1024 * 1024 || !input.seek(0)) return {};
     const auto bytes = input.readAll();
@@ -207,7 +294,7 @@ QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteAr
     limits.max_memory_block_size = 256ULL * 1024 * 1024;
     limits.max_total_memory = 512ULL * 1024 * 1024;
     limits.max_color_profile_size = 1024 * 1024;
-    limits.max_sequence_frames = ext ? 600 : 1;
+    limits.max_sequence_frames = ext ? 65535 : 1;
     if (heif_context_set_security_limits(context.get(), &limits).code != heif_error_Ok) return {};
     heif_context_set_max_decoding_threads(context.get(), 0);
     if (heif_context_read_from_memory_without_copy(context.get(), bytes.constData(), bytes.size(), nullptr).code != heif_error_Ok) return {};
@@ -248,10 +335,108 @@ QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteAr
         options->progress_user_data = &cancel;
         options->cancel_decoding = [](void* data) { return static_cast<std::atomic<bool>*>(data)->load() ? 1 : 0; };
 
-        std::vector<QImage> frames;
+        auto decodeHeifTrackFrame = [&](heif_image* decoded, int w, int h) -> QImage {
+            heif_color_profile_nclx* rawNclx = nullptr;
+            heif_image_get_nclx_color_profile(decoded, &rawNclx);
+            std::unique_ptr<heif_color_profile_nclx, decltype(&heif_nclx_color_profile_free)> nclx(rawNclx, heif_nclx_color_profile_free);
+            if (nclx && (int(nclx->transfer_characteristics) == 16 || int(nclx->transfer_characteristics) == 18)) {
+                error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
+                return {};
+            }
+            int stride = 0;
+            const auto pixels = heif_image_get_plane_readonly(decoded, heif_channel_interleaved, &stride);
+            if (!pixels || stride < w * 4) return {};
+            QImage frameImg = QImage(pixels, w, h, stride,
+                heif_image_is_premultiplied_alpha(decoded) ? QImage::Format_RGBA8888_Premultiplied : QImage::Format_RGBA8888).copy();
+            frameImg.setColorSpace(QColorSpace::SRgb);
+            frameImg = compositeToWhiteSRgb(std::move(frameImg));
+            if (frameImg.isNull()) error = E_OUTOFMEMORY;
+            return frameImg;
+        };
+
+        constexpr uint64_t kMaxCumulativePixels = 512ULL * 1024 * 1024;
+
+        if (ext->keepPlaybackFrames) {
+            std::vector<QImage> playbackFrames;
+            std::vector<int64_t> playbackDurations;
+            uint64_t cumulativePixels = 0;
+            uint64_t storedPixels = 0;
+            QSize maxDim(2560, 1440);
+            QSize origSize{int(tw), int(th)};
+            bool truncated = false;
+
+            for (int frameIdx = 0; frameIdx <= 600; ++frameIdx) {
+                if (cancel.load()) { error = HRESULT_FROM_WIN32(ERROR_CANCELLED); return {}; }
+                heif_image* rawImg = nullptr;
+                const auto err = heif_track_decode_next_image(track.get(), &rawImg, heif_colorspace_RGB, heif_chroma_interleaved_RGBA, options.get());
+                if (err.code == heif_error_End_of_sequence) break;
+                if (err.code != heif_error_Ok || !rawImg) {
+                    if (cancel.load()) error = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+                    if (frameIdx == 0) return {};
+                    break;
+                }
+                std::unique_ptr<heif_image, decltype(&heif_image_release)> decoded(rawImg, heif_image_release);
+                if (frameIdx == 600) { truncated = true; break; }
+                const int w = heif_image_get_width(decoded.get(), heif_channel_interleaved);
+                const int h = heif_image_get_height(decoded.get(), heif_channel_interleaved);
+                if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || uint64_t(w) * h > 67108864) {
+                    if (frameIdx == 0) return {};
+                    break;
+                }
+                if (frameIdx == 0) origSize = QSize(w, h);
+                if (frameIdx > 0 && cumulativePixels + uint64_t(w) * h > kMaxCumulativePixels) {
+                    truncated = true;
+                    break;
+                }
+                cumulativePixels += uint64_t(w) * h;
+                QImage frameImg = decodeHeifTrackFrame(decoded.get(), w, h);
+                if (frameImg.isNull()) {
+                    if (frameIdx == 0) return {};
+                    break;
+                }
+                const uint32_t ticks = heif_image_get_duration(decoded.get());
+                const int64_t dur100ns = (ticks > 0)
+                    ? std::max<int64_t>(1LL, (int64_t(ticks) * 10000000LL) / timescale)
+                    : 1000000LL;
+                if (!appendBoundedHeifPlaybackFrame(playbackFrames, std::move(frameImg), storedPixels, maxDim)) {
+                    truncated = true;
+                    break;
+                }
+                playbackDurations.push_back(dur100ns);
+            }
+            if (playbackFrames.empty()) {
+                error = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
+                return {};
+            }
+            int64_t totalDur = 0;
+            for (int64_t d : playbackDurations) totalDur += d;
+            ext->comparisonTruncated = truncated;
+            ext->sourceSize = origSize;
+            if (playbackFrames.size() >= 2 || truncated) {
+                ext->kind = ImageEvidenceKind::AnimatedImage;
+                ext->frameOrPageCount = static_cast<uint32_t>(playbackFrames.size());
+                ext->totalDuration100ns = totalDur;
+                ext->fps = (totalDur > 0) ? (double(playbackFrames.size()) * 10000000.0 / double(totalDur)) : 10.0;
+            } else {
+                ext->kind = ImageEvidenceKind::StaticImage;
+                ext->frameOrPageCount = 1;
+            }
+            const size_t retIdx = (ext->requestedIndex >= 0) ? (size_t(ext->requestedIndex) % playbackFrames.size()) : 0;
+            QImage retImg = playbackFrames[retIdx];
+            ext->playbackFrames = std::move(playbackFrames);
+            ext->frameDurations = std::move(playbackDurations);
+            format = outFmt;
+            error = S_OK;
+            return retImg;
+        }
+
+        // Analysis / single-frame path (keepPlaybackFrames == false): cap in-RAM frames to <= 16 in pass 1
+        std::map<size_t, QImage> keptFrames;
         std::vector<int64_t> durations100ns;
         uint64_t cumulativePixels = 0;
-        constexpr uint64_t kMaxCumulativePixels = 512ULL * 1024 * 1024;
+        QSize origSize{int(tw), int(th)};
+        constexpr int kInlineKeepLimit = 16;
+
         for (int frameIdx = 0; frameIdx <= 600; ++frameIdx) {
             if (cancel.load()) { error = HRESULT_FROM_WIN32(ERROR_CANCELLED); return {}; }
             heif_image* rawImg = nullptr;
@@ -262,15 +447,36 @@ QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteAr
                 return {};
             }
             std::unique_ptr<heif_image, decltype(&heif_image_release)> decoded(rawImg, heif_image_release);
-            if(frameIdx==600) { error=HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE); return {}; }
-            const int w = heif_image_get_width(decoded.get(), heif_channel_interleaved);
-            const int h = heif_image_get_height(decoded.get(), heif_channel_interleaved);
-            if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || uint64_t(w) * h > 67108864) return {};
-            cumulativePixels += uint64_t(w) * h;
-            if (cumulativePixels > kMaxCumulativePixels) {
+            if (frameIdx == 600) {
+                if (keptFrames.count(0)) {
+                    ext->comparisonTruncated = true;
+                    ext->previewFrame = keptFrames[0];
+                    ext->sourceSize = origSize;
+                    ext->kind = ImageEvidenceKind::AnimatedImage;
+                    ext->frameOrPageCount = 601u;
+                    format = outFmt;
+                }
                 error = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
                 return {};
             }
+            const int w = heif_image_get_width(decoded.get(), heif_channel_interleaved);
+            const int h = heif_image_get_height(decoded.get(), heif_channel_interleaved);
+            if (w <= 0 || h <= 0 || w > 16384 || h > 16384 || uint64_t(w) * h > 67108864) return {};
+            if (frameIdx == 0) origSize = QSize(w, h);
+            cumulativePixels += uint64_t(w) * h;
+            if (cumulativePixels > kMaxCumulativePixels) {
+                if (keptFrames.count(0)) {
+                    ext->comparisonTruncated = true;
+                    ext->previewFrame = keptFrames[0];
+                    ext->sourceSize = origSize;
+                    ext->kind = ImageEvidenceKind::AnimatedImage;
+                    ext->frameOrPageCount = uint32_t(frameIdx + 1);
+                    format = outFmt;
+                }
+                error = HRESULT_FROM_WIN32(ERROR_FILE_TOO_LARGE);
+                return {};
+            }
+            // Always verify HDR transfer rejection even for skipped frames
             heif_color_profile_nclx* rawNclx = nullptr;
             heif_image_get_nclx_color_profile(decoded.get(), &rawNclx);
             std::unique_ptr<heif_color_profile_nclx, decltype(&heif_nclx_color_profile_free)> nclx(rawNclx, heif_nclx_color_profile_free);
@@ -278,45 +484,83 @@ QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteAr
                 error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED);
                 return {};
             }
-            int stride = 0;
-            const auto pixels = heif_image_get_plane_readonly(decoded.get(), heif_channel_interleaved, &stride);
-            if (!pixels || stride < w * 4) return {};
-            QImage frameImg = QImage(pixels, w, h, stride,
-                heif_image_is_premultiplied_alpha(decoded.get()) ? QImage::Format_RGBA8888_Premultiplied : QImage::Format_RGBA8888).copy();
-            frameImg.setColorSpace(QColorSpace::SRgb);
-            frameImg = compositeToWhiteSRgb(std::move(frameImg));
-            if (frameImg.isNull()) { error = E_OUTOFMEMORY; return {}; }
-
+            if (frameIdx < kInlineKeepLimit || (ext->requestedIndex >= 0 && frameIdx == ext->requestedIndex)) {
+                QImage frameImg = decodeHeifTrackFrame(decoded.get(), w, h);
+                if (frameImg.isNull()) return {};
+                keptFrames[size_t(frameIdx)] = std::move(frameImg);
+            }
             const uint32_t ticks = heif_image_get_duration(decoded.get());
             const int64_t dur100ns = (ticks > 0)
                 ? std::max<int64_t>(1LL, (int64_t(ticks) * 10000000LL) / timescale)
                 : 1000000LL;
-            frames.push_back(std::move(frameImg));
             durations100ns.push_back(dur100ns);
         }
-        if (frames.empty()) {
+        if (durations100ns.empty() || !keptFrames.count(0)) {
             error = HRESULT_FROM_WIN32(ERROR_INVALID_DATA);
             return {};
         }
+
+        const size_t totalFrames = durations100ns.size();
+        const size_t retIdx = (ext->requestedIndex >= 0) ? (size_t(ext->requestedIndex) % totalFrames) : 0;
         int64_t totalDur = 0;
         for (int64_t d : durations100ns) totalDur += d;
-        if (frames.size() >= 2) {
+
+        if (totalFrames >= 2) {
+            ext->sourceSize = origSize;
             ext->kind = ImageEvidenceKind::AnimatedImage;
-            ext->frameOrPageCount = static_cast<uint32_t>(frames.size());
+            ext->frameOrPageCount = static_cast<uint32_t>(totalFrames);
             ext->totalDuration100ns = totalDur;
-            ext->fps = (totalDur > 0) ? (double(frames.size()) * 10000000.0 / double(totalDur)) : 10.0;
+            ext->fps = (totalDur > 0) ? (double(totalFrames) * 10000000.0 / double(totalDur)) : 10.0;
             const auto sampleIdx = selectTemporalSampleIndices(durations100ns);
+
+            std::vector<bool> missing(totalFrames, false);
+            size_t maxMissing = 0;
+            bool anyMissing = false;
+            if (!keptFrames.count(retIdx)) {
+                missing[retIdx] = true;
+                maxMissing = std::max(maxMissing, retIdx);
+                anyMissing = true;
+            }
+            if (ext->requestedIndex < 0) {
+                for (size_t sIdx : sampleIdx) {
+                    if (!keptFrames.count(sIdx)) {
+                        missing[sIdx] = true;
+                        maxMissing = std::max(maxMissing, sIdx);
+                        anyMissing = true;
+                    }
+                }
+            }
+            if (anyMissing) {
+                heif_track* rawTrack2 = heif_context_get_track(context.get(), 0);
+                if (!rawTrack2) return {};
+                std::unique_ptr<heif_track, decltype(&heif_track_release)> track2(rawTrack2, heif_track_release);
+                for (size_t idx = 0; idx <= maxMissing; ++idx) {
+                    if (cancel.load()) { error = HRESULT_FROM_WIN32(ERROR_CANCELLED); return {}; }
+                    heif_image* rawImg = nullptr;
+                    const auto err = heif_track_decode_next_image(track2.get(), &rawImg, heif_colorspace_RGB, heif_chroma_interleaved_RGBA, options.get());
+                    if (err.code != heif_error_Ok || !rawImg) return {};
+                    std::unique_ptr<heif_image, decltype(&heif_image_release)> decoded(rawImg, heif_image_release);
+                    if (missing[idx]) {
+                        const int w = heif_image_get_width(decoded.get(), heif_channel_interleaved);
+                        const int h = heif_image_get_height(decoded.get(), heif_channel_interleaved);
+                        QImage frameImg = decodeHeifTrackFrame(decoded.get(), w, h);
+                        if (frameImg.isNull()) return {};
+                        keptFrames[idx] = std::move(frameImg);
+                    }
+                }
+            }
             ext->sampledFrames.clear();
-            for (size_t idx : sampleIdx) ext->sampledFrames.push_back(frames[idx]);
+            if (ext->requestedIndex < 0) {
+                for (size_t idx : sampleIdx) ext->sampledFrames.push_back(keptFrames[idx]);
+            }
         } else {
+            ext->sourceSize = origSize;
             ext->kind = ImageEvidenceKind::StaticImage;
             ext->frameOrPageCount = 1;
         }
-        const size_t retIdx = (ext->requestedIndex >= 0) ? (size_t(ext->requestedIndex) % frames.size()) : 0;
-        if(ext->keepPlaybackFrames) { ext->playbackFrames=frames; ext->frameDurations=durations100ns; }
         format = outFmt;
         error = S_OK;
-        return frames[retIdx];
+        return std::move(keptFrames[retIdx]);
     }
 
     // Multi-image HEIF / AVIF container
@@ -331,6 +575,7 @@ QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteAr
             heif_image_handle* rawH = nullptr;
             if (heif_context_get_image_handle(context.get(), ids[idx], &rawH).code != heif_error_Ok) return {};
             std::unique_ptr<heif_image_handle, decltype(&heif_image_handle_release)> h(rawH, heif_image_handle_release);
+            if (idx == 0 && ext->captureTimeSec <= 0) ext->captureTimeSec = extractHeifCaptureTimeSec(h.get());
             return compositeToWhiteSRgb(decodeHeifHandle(h.get(), cancel, error));
         };
         ext->kind = ImageEvidenceKind::MultiPageDocument;
@@ -368,6 +613,7 @@ QImage readHeif(QFile& input, std::atomic<bool>& cancel, HRESULT& error, QByteAr
     heif_image_handle* rawHandle = nullptr;
     if (heif_context_get_primary_image_handle(context.get(), &rawHandle).code != heif_error_Ok) return {};
     std::unique_ptr<heif_image_handle, decltype(&heif_image_handle_release)> handle(rawHandle, heif_image_handle_release);
+    if (ext) ext->captureTimeSec = extractHeifCaptureTimeSec(handle.get());
     QImage result = decodeHeifHandle(handle.get(), cancel, error);
     if (result.isNull()) return {};
     if (ext) {

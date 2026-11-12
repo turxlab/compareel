@@ -18,7 +18,7 @@ Compareel avoids decoding files when no match is possible under your current sca
 
 - In **Exact copies**, a file is only hashed when at least one other file has the exact same byte size. Files with a unique size are counted as not compared.
 - In **Similar videos**, a video is only sampled when another video's length is within **Duration tolerance (seconds)** (0.20 s by default in **Tools** > **Scan rules…**).
-- Files outside **Minimum size (MB)** or **Maximum size (MB, 0 = unlimited)** in **Scan rules…** are skipped.
+- Files outside **Minimum size** or **Maximum size (0 = unlimited)** in **Scan rules…** are skipped.
 - Videos whose sampled positions are mostly black or single-color frames with too little visual detail cannot be matched reliably by picture and are left ungrouped.
 
 ## Which formats are unsupported or have limits?
@@ -26,7 +26,7 @@ Compareel avoids decoding files when no match is possible under your current sca
 Files that cannot be decoded never stop a scan; Compareel skips them and lists each reason and `0x...` code in **Tools** > **Scan report**. Notable rules and safety limits:
 
 - **Videos:** Opened with the system decoder (Media Foundation on Windows) or the bundled FFmpeg 8.1 decoders. Encrypted (DRM) or damaged streams are skipped and reported. Embedded subtitles are listed in **File details**, not played or compared.
-- **JPEG XL (`jxl`):** Supported in **Exact copies** mode only.
+- **JPEG XL (`jxl`):** Decoded via `libjxl` in FFmpeg (included in official Windows, macOS, and Flatpak builds).
 - **JPEG XR (`jxr`, `wdp`, `hdp`):** Supported on Windows only (via WIC); macOS and Linux have no built-in decoder.
 - **Camera RAW:** Compares either embedded previews or system-developed RAW images (Windows and macOS); embedded previews and developed RAW data never match each other.
 - **Animations and multi-page images:** Static images never match animations. Animations are capped at 600 frames (or 512 megapixels total); multi-page files are capped at 256 pages.

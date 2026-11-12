@@ -1,7 +1,9 @@
 #include "ImageReaderInternal.h"
 #include <QColorSpace>
 #include <QtEndian>
+#include <bit>
 #include <cmath>
+#include <cstring>
 
 extern "C" {
 #include <libavcodec/avcodec.h>
@@ -9,6 +11,38 @@ extern "C" {
 }
 
 namespace StillImages::Internal {
+
+namespace {
+
+float halfBitsToFloat(uint16_t h) {
+    const uint32_t sign = (h >> 15) & 1u;
+    const uint32_t exp = (h >> 10) & 0x1Fu;
+    const uint32_t mant = h & 0x3FFu;
+    if (exp == 0) {
+        const float v = static_cast<float>(mant) * (1.0f / 16777216.0f);
+        return sign ? -v : v;
+    }
+    if (exp == 31) {
+        return (mant == 0 && !sign) ? 65504.0f : 0.0f;
+    }
+    const uint32_t fbits = (sign << 31) | ((exp + 112u) << 23) | (mant << 13);
+    return std::bit_cast<float>(fbits);
+}
+
+float readFloatSample(const uint8_t* ptr, bool isHalf, bool isBigEndian) {
+    if (isHalf) {
+        const uint16_t bits = isBigEndian ? qFromBigEndian<quint16>(ptr) : qFromLittleEndian<quint16>(ptr);
+        return halfBitsToFloat(bits);
+    }
+    const uint32_t bits = isBigEndian ? qFromBigEndian<quint32>(ptr) : qFromLittleEndian<quint32>(ptr);
+    return std::bit_cast<float>(bits);
+}
+
+float clampAlphaSample(float a) {
+    return std::isfinite(a) ? std::clamp(a, 0.0f, 1.0f) : 1.0f;
+}
+
+} // namespace
 
 uint8_t tonemapFloatToSrgbByte(float v) {
     if (!std::isfinite(v) || v <= 0.0f) return 0;
@@ -29,22 +63,34 @@ QImage avFrameToWhiteSRgb(const AVFrame* frame, bool* outIsFloatHdr = nullptr) {
     const int h = frame->height;
     const auto fmt = static_cast<AVPixelFormat>(frame->format);
 
-    if (fmt == AV_PIX_FMT_GBRPF32LE || fmt == AV_PIX_FMT_GBRAPF32LE) {
+    if (fmt == AV_PIX_FMT_GBRPF32LE || fmt == AV_PIX_FMT_GBRPF32BE ||
+        fmt == AV_PIX_FMT_GBRAPF32LE || fmt == AV_PIX_FMT_GBRAPF32BE ||
+        fmt == AV_PIX_FMT_GBRPF16LE || fmt == AV_PIX_FMT_GBRPF16BE ||
+        fmt == AV_PIX_FMT_GBRAPF16LE || fmt == AV_PIX_FMT_GBRAPF16BE) {
+        if (!frame->data[0] || !frame->data[1] || !frame->data[2]) return {};
         if (outIsFloatHdr) *outIsFloatHdr = true;
         QImage out(w, h, QImage::Format_RGB32);
         if (out.isNull()) return {};
-        const bool hasAlpha = (fmt == AV_PIX_FMT_GBRAPF32LE && frame->data[3]);
+        const bool isHalf = (fmt == AV_PIX_FMT_GBRPF16LE || fmt == AV_PIX_FMT_GBRPF16BE ||
+                             fmt == AV_PIX_FMT_GBRAPF16LE || fmt == AV_PIX_FMT_GBRAPF16BE);
+        const bool isBe = (fmt == AV_PIX_FMT_GBRPF32BE || fmt == AV_PIX_FMT_GBRAPF32BE ||
+                           fmt == AV_PIX_FMT_GBRPF16BE || fmt == AV_PIX_FMT_GBRAPF16BE);
+        const bool wantAlpha = (fmt == AV_PIX_FMT_GBRAPF32LE || fmt == AV_PIX_FMT_GBRAPF32BE ||
+                                fmt == AV_PIX_FMT_GBRAPF16LE || fmt == AV_PIX_FMT_GBRAPF16BE);
+        const bool hasAlpha = (wantAlpha && frame->data[3]);
+        const int step = isHalf ? 2 : 4;
         for (int y = 0; y < h; ++y) {
-            const float* gRow = reinterpret_cast<const float*>(frame->data[0] + int64_t(y) * frame->linesize[0]);
-            const float* bRow = reinterpret_cast<const float*>(frame->data[1] + int64_t(y) * frame->linesize[1]);
-            const float* rRow = reinterpret_cast<const float*>(frame->data[2] + int64_t(y) * frame->linesize[2]);
-            const float* aRow = hasAlpha ? reinterpret_cast<const float*>(frame->data[3] + int64_t(y) * frame->linesize[3]) : nullptr;
+            const uint8_t* gRow = frame->data[0] + int64_t(y) * frame->linesize[0];
+            const uint8_t* bRow = frame->data[1] + int64_t(y) * frame->linesize[1];
+            const uint8_t* rRow = frame->data[2] + int64_t(y) * frame->linesize[2];
+            const uint8_t* aRow = hasAlpha ? (frame->data[3] + int64_t(y) * frame->linesize[3]) : nullptr;
             uint8_t* dst = out.scanLine(y);
             for (int x = 0; x < w; ++x) {
-                const float a = aRow ? std::clamp(aRow[x], 0.0f, 1.0f) : 1.0f;
-                const uint8_t r8 = tonemapFloatToSrgbByte(rRow[x]);
-                const uint8_t g8 = tonemapFloatToSrgbByte(gRow[x]);
-                const uint8_t b8 = tonemapFloatToSrgbByte(bRow[x]);
+                const int off = x * step;
+                const float a = aRow ? clampAlphaSample(readFloatSample(aRow + off, isHalf, isBe)) : 1.0f;
+                const uint8_t r8 = tonemapFloatToSrgbByte(readFloatSample(rRow + off, isHalf, isBe));
+                const uint8_t g8 = tonemapFloatToSrgbByte(readFloatSample(gRow + off, isHalf, isBe));
+                const uint8_t b8 = tonemapFloatToSrgbByte(readFloatSample(bRow + off, isHalf, isBe));
                 dst[x * 4 + 0] = static_cast<uint8_t>(std::clamp(int(std::round(b8 * a + 255.0f * (1.0f - a))), 0, 255));
                 dst[x * 4 + 1] = static_cast<uint8_t>(std::clamp(int(std::round(g8 * a + 255.0f * (1.0f - a))), 0, 255));
                 dst[x * 4 + 2] = static_cast<uint8_t>(std::clamp(int(std::round(r8 * a + 255.0f * (1.0f - a))), 0, 255));
@@ -55,18 +101,34 @@ QImage avFrameToWhiteSRgb(const AVFrame* frame, bool* outIsFloatHdr = nullptr) {
         return out;
     }
 
-    if (fmt == AV_PIX_FMT_GRAYF32LE) {
+    if (fmt == AV_PIX_FMT_GRAYF32LE || fmt == AV_PIX_FMT_GRAYF32BE ||
+        fmt == AV_PIX_FMT_GRAYF16LE || fmt == AV_PIX_FMT_GRAYF16BE ||
+        fmt == AV_PIX_FMT_YAF32LE || fmt == AV_PIX_FMT_YAF32BE ||
+        fmt == AV_PIX_FMT_YAF16LE || fmt == AV_PIX_FMT_YAF16BE) {
+        if (!frame->data[0]) return {};
         if (outIsFloatHdr) *outIsFloatHdr = true;
         QImage out(w, h, QImage::Format_RGB32);
         if (out.isNull()) return {};
+        const bool isHalf = (fmt == AV_PIX_FMT_GRAYF16LE || fmt == AV_PIX_FMT_GRAYF16BE ||
+                             fmt == AV_PIX_FMT_YAF16LE || fmt == AV_PIX_FMT_YAF16BE);
+        const bool isBe = (fmt == AV_PIX_FMT_GRAYF32BE || fmt == AV_PIX_FMT_GRAYF16BE ||
+                           fmt == AV_PIX_FMT_YAF32BE || fmt == AV_PIX_FMT_YAF16BE);
+        const int ch = (fmt == AV_PIX_FMT_YAF32LE || fmt == AV_PIX_FMT_YAF32BE ||
+                        fmt == AV_PIX_FMT_YAF16LE || fmt == AV_PIX_FMT_YAF16BE) ? 2 : 1;
+        const int step = isHalf ? 2 : 4;
         for (int y = 0; y < h; ++y) {
-            const float* yRow = reinterpret_cast<const float*>(frame->data[0] + int64_t(y) * frame->linesize[0]);
+            const uint8_t* yRow = frame->data[0] + int64_t(y) * frame->linesize[0];
             uint8_t* dst = out.scanLine(y);
             for (int x = 0; x < w; ++x) {
-                const uint8_t v = tonemapFloatToSrgbByte(yRow[x]);
-                dst[x * 4 + 0] = v;
-                dst[x * 4 + 1] = v;
-                dst[x * 4 + 2] = v;
+                const uint8_t* px = yRow + x * ch * step;
+                const uint8_t v = tonemapFloatToSrgbByte(readFloatSample(px, isHalf, isBe));
+                const float a = (ch == 2) ? clampAlphaSample(readFloatSample(px + step, isHalf, isBe)) : 1.0f;
+                const uint8_t outV = (ch == 2)
+                    ? static_cast<uint8_t>(std::clamp(int(std::round(v * a + 255.0f * (1.0f - a))), 0, 255))
+                    : v;
+                dst[x * 4 + 0] = outV;
+                dst[x * 4 + 1] = outV;
+                dst[x * 4 + 2] = outV;
                 dst[x * 4 + 3] = 255;
             }
         }
@@ -74,19 +136,30 @@ QImage avFrameToWhiteSRgb(const AVFrame* frame, bool* outIsFloatHdr = nullptr) {
         return out;
     }
 
-    if (fmt == AV_PIX_FMT_RGBF32LE || fmt == AV_PIX_FMT_RGBAF32LE) {
+    if (fmt == AV_PIX_FMT_RGBF32LE || fmt == AV_PIX_FMT_RGBF32BE ||
+        fmt == AV_PIX_FMT_RGBAF32LE || fmt == AV_PIX_FMT_RGBAF32BE ||
+        fmt == AV_PIX_FMT_RGBF16LE || fmt == AV_PIX_FMT_RGBF16BE ||
+        fmt == AV_PIX_FMT_RGBAF16LE || fmt == AV_PIX_FMT_RGBAF16BE) {
+        if (!frame->data[0]) return {};
         if (outIsFloatHdr) *outIsFloatHdr = true;
-        const int ch = (fmt == AV_PIX_FMT_RGBAF32LE) ? 4 : 3;
+        const bool isHalf = (fmt == AV_PIX_FMT_RGBF16LE || fmt == AV_PIX_FMT_RGBF16BE ||
+                             fmt == AV_PIX_FMT_RGBAF16LE || fmt == AV_PIX_FMT_RGBAF16BE);
+        const bool isBe = (fmt == AV_PIX_FMT_RGBF32BE || fmt == AV_PIX_FMT_RGBAF32BE ||
+                           fmt == AV_PIX_FMT_RGBF16BE || fmt == AV_PIX_FMT_RGBAF16BE);
+        const int ch = (fmt == AV_PIX_FMT_RGBAF32LE || fmt == AV_PIX_FMT_RGBAF32BE ||
+                        fmt == AV_PIX_FMT_RGBAF16LE || fmt == AV_PIX_FMT_RGBAF16BE) ? 4 : 3;
+        const int step = isHalf ? 2 : 4;
         QImage out(w, h, QImage::Format_RGB32);
         if (out.isNull()) return {};
         for (int y = 0; y < h; ++y) {
-            const float* src = reinterpret_cast<const float*>(frame->data[0] + int64_t(y) * frame->linesize[0]);
+            const uint8_t* src = frame->data[0] + int64_t(y) * frame->linesize[0];
             uint8_t* dst = out.scanLine(y);
             for (int x = 0; x < w; ++x) {
-                const float a = (ch == 4) ? std::clamp(src[x * 4 + 3], 0.0f, 1.0f) : 1.0f;
-                const uint8_t r8 = tonemapFloatToSrgbByte(src[x * ch + 0]);
-                const uint8_t g8 = tonemapFloatToSrgbByte(src[x * ch + 1]);
-                const uint8_t b8 = tonemapFloatToSrgbByte(src[x * ch + 2]);
+                const uint8_t* px = src + x * ch * step;
+                const float a = (ch == 4) ? clampAlphaSample(readFloatSample(px + 3 * step, isHalf, isBe)) : 1.0f;
+                const uint8_t r8 = tonemapFloatToSrgbByte(readFloatSample(px + 0 * step, isHalf, isBe));
+                const uint8_t g8 = tonemapFloatToSrgbByte(readFloatSample(px + 1 * step, isHalf, isBe));
+                const uint8_t b8 = tonemapFloatToSrgbByte(readFloatSample(px + 2 * step, isHalf, isBe));
                 dst[x * 4 + 0] = static_cast<uint8_t>(std::clamp(int(std::round(b8 * a + 255.0f * (1.0f - a))), 0, 255));
                 dst[x * 4 + 1] = static_cast<uint8_t>(std::clamp(int(std::round(g8 * a + 255.0f * (1.0f - a))), 0, 255));
                 dst[x * 4 + 2] = static_cast<uint8_t>(std::clamp(int(std::round(r8 * a + 255.0f * (1.0f - a))), 0, 255));

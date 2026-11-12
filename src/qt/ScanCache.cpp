@@ -14,6 +14,7 @@
 #include <QSqlQuery>
 #include <QUuid>
 #include <QSaveFile>
+#include <QSet>
 #include <QtEndian>
 #if __has_include(<QtZlib/zlib.h>)
 #include <QtZlib/zlib.h>
@@ -119,24 +120,39 @@ bool signature(const QJsonObject& object,FrameSignature& value,bool nested=false
     }
     return true;
 }
-// Version 4 changed how transparency is flattened; formats that cannot carry alpha keep version 3 and stay cached.
+bool isRawImageExtension(const QString& ext) {
+    static const QSet<QString> kRawExts={
+        "dng","cr2","cr3","nef","nrw","arw","srf","sr2","raf","orf",
+        "rw2","pef","srw","erf","kdc","dcr","3fr","mef","mos","iiq","raw"
+    };
+    return kRawExts.contains(ext);
+}
+// Version 4 changed how transparency is flattened; version 5 fixed Camera RAW embedded preview & reduced-res IFD0 selection
+// (and half-float EXR/PHM tone-mapping); version 6 records full Camera RAW sensor dimensions instead of embedded preview dimensions.
 int imageRenderVersion(const std::wstring& path) {
     if(!VideoScanner::IsImageExtension(path)) return 0;
     auto extension=QFileInfo(QString::fromStdWString(path)).suffix().toLower();
-    return extension=="jpg" || extension=="jpeg" || extension=="jpe" || extension=="jfif"?3:4;
+    if(extension=="jpg" || extension=="jpeg" || extension=="jpe" || extension=="jfif") return 3;
+    if(isRawImageExtension(extension)) return 6;
+    if(extension=="exr" || extension=="phm") return 5;
+    return 4;
 }
 QByteArray encode(const VideoFileInfo& file,bool thumbnail=true) {
     QJsonArray samples; for(const auto& sample:file.samples) samples.append(signature(sample));
+    const int currentImgRenderVer=imageRenderVersion(file.fullPath);
+    const int encodedImgRenderVer=(currentImgRenderVer>0 && file.cachedImageRenderVersion>0)?int(file.cachedImageRenderVersion):currentImgRenderVer;
+    const int encodedDetailsVer=file.cachedDetailsVersion>0?int(file.cachedDetailsVersion):2;
     QJsonObject object{{"duration",QString::number(file.duration100ns)},{"width",int(file.width)},{"height",int(file.height)},
-        {"renderVersion",2},{"imageRenderVersion",imageRenderVersion(file.fullPath)},{"imageDetailVersion",VideoScanner::IsImageExtension(file.fullPath)?1:0},{"detailsVersion",1},
+        {"renderVersion",2},{"imageRenderVersion",encodedImgRenderVer},{"imageDetailVersion",VideoScanner::IsImageExtension(file.fullPath)?1:0},{"detailsVersion",encodedDetailsVer},
         {"imageKind",int(file.imageKind)},{"imageFrames",int(file.imageFrameCount)},
+        {"createdTime",QString::number(file.createdTime)},{"captureTime",QString::number(file.captureTimeSec)},
         {"videoBitrate",int(file.videoBitrate)},{"audioChannels",file.audioChannels},{"audioRate",int(file.audioSampleRate)},{"audioCodec",QString::fromStdWString(file.audioCodec)},{"fps",file.fps},{"codec",QString::fromStdWString(file.codec)},{"hash",QString::fromStdString(file.contentHash)},
-        {"metadata",file.metadataLoaded},{"frame",file.frameLoaded},{"first",signature(file.sigFirst)},{"alternate",signature(file.sigAlt)},
+        {"metadata",file.metadataLoaded},{"frame",file.frameLoaded},{"previewFailed",file.previewFailed},{"first",signature(file.sigFirst)},{"alternate",signature(file.sigAlt)},
         {"samples",samples},{"thumb",thumbnail?QString::fromLatin1(QByteArray(reinterpret_cast<const char*>(file.thumbBGRA.data()),file.thumbBGRA.size()).toBase64()):QString()}};
     object.insert("evidenceVersion",3); if(thumbnail && !file.thumbBGRA.empty()) object.insert("thumbVersion",2);
     return QJsonDocument(object).toJson(QJsonDocument::Compact);
 }
-bool decode(const QByteArray& payload,VideoFileInfo& file) {
+bool decode(const QByteArray& payload,VideoFileInfo& file,bool allowLegacyRenderVersion=false) {
     if(payload.size()>131072) return false;
     QByteArray raw=payload;
     if(payload.startsWith("CZ1")) {
@@ -156,27 +172,58 @@ bool decode(const QByteArray& payload,VideoFileInfo& file) {
     if(!std::isfinite(value.fps) || value.fps<0 || value.fps>1000) return false;
     value.codec=object["codec"].toString().toStdWString(); value.contentHash=object["hash"].toString().toStdString();
     if(!value.contentHash.empty() && (value.contentHash.size()!=64 || value.contentHash.find_first_not_of("0123456789abcdef")!=std::string::npos)) return false;
+    if(object.contains("createdTime")) {
+        bool cOk=false; const uint64_t ct=object["createdTime"].toString().toULongLong(&cOk);
+        if(!cOk) return false;
+        if(ct>0) value.createdTime=ct;
+    }
+    if(object.contains("captureTime")) {
+        bool capOk=false; const int64_t cap=object["captureTime"].toString().toLongLong(&capOk);
+        if(!capOk || cap<0 || cap>4102444800LL) return false;
+        value.captureTimeSec=cap;
+    }
     value.imageKind=static_cast<ImageEvidenceKind>(std::clamp(object["imageKind"].toInt(0),0,8));
     value.imageFrameCount=static_cast<uint32_t>(std::clamp(object["imageFrames"].toInt(1),1,100000));
     value.videoBitrate=uint32_t(std::max(0,object["videoBitrate"].toInt()));
     value.audioChannels=object["audioChannels"].toInt(-1); value.audioSampleRate=uint32_t(std::max(0,object["audioRate"].toInt())); value.audioCodec=object["audioCodec"].toString().toStdWString();
     if(value.audioChannels<-1 || value.audioChannels>128 || value.audioSampleRate>768000) return false;
-    value.metadataLoaded=object["metadata"].toBool() && object["detailsVersion"].toInt()==1; value.frameLoaded=object["frame"].toBool();
+    const bool isImage=VideoScanner::IsImageExtension(file.fullPath);
+    const int detailsVer=object["detailsVersion"].toInt();
+    value.cachedDetailsVersion=(!isImage && detailsVer==1)?2:((detailsVer>=1 && detailsVer<=255)?uint8_t(detailsVer):2);
+    value.metadataLoaded=object["metadata"].toBool() && (detailsVer==2 || (!isImage && detailsVer==1) || (allowLegacyRenderVersion && detailsVer==1));
+    value.frameLoaded=object["frame"].toBool();
+    value.previewFailed=object["previewFailed"].toBool(value.previewFailed);
     if(!signature(object["first"].toObject(),value.sigFirst) || !signature(object["alternate"].toObject(),value.sigAlt)) return false;
     auto samples=object["samples"].toArray(); if(!samples.isEmpty() && (samples.size()<2 || samples.size()>5)) return false;
     value.samples.clear(); for(auto sample:samples) { FrameSignature s; if(!signature(sample.toObject(),s)) return false; value.samples.push_back(s); }
     auto thumbnail=QByteArray::fromBase64(object["thumb"].toString().toLatin1());
     if(!thumbnail.isEmpty() && thumbnail.size()!=THUMB_W*THUMB_H*4) return false;
-    value.thumbBGRA.assign(thumbnail.begin(),thumbnail.end()); if(VideoScanner::IsImageExtension(file.fullPath) && object["thumbVersion"].toInt()!=2) value.thumbBGRA.clear();
-    // Rotation and HDR normalization changed displayed pixels; keep SHA but re-read old image evidence.
-    if(object["renderVersion"].toInt()!=2 || (VideoScanner::IsImageExtension(file.fullPath) && object["imageRenderVersion"].toInt()!=imageRenderVersion(file.fullPath))) { value.metadataLoaded=false; value.frameLoaded=false; value.sigFirst={}; value.sigAlt={}; value.samples.clear(); value.thumbBGRA.clear(); }
+    value.thumbBGRA.assign(thumbnail.begin(),thumbnail.end()); if(isImage && object["thumbVersion"].toInt()!=2) value.thumbBGRA.clear();
+    // Rotation, HDR normalization, and RAW preview selection changed displayed pixels; keep SHA in cache while preserving frozen .cvsession snapshots.
+    const int savedImgRenderVer=object["imageRenderVersion"].toInt();
+    const int currentImgRenderVer=imageRenderVersion(file.fullPath);
+    const bool imgRenderOk=!isImage ||
+        savedImgRenderVer==currentImgRenderVer ||
+        (allowLegacyRenderVersion && ((savedImgRenderVer==4 && currentImgRenderVer==5) || ((savedImgRenderVer==4 || savedImgRenderVer==5) && currentImgRenderVer==6)));
+    value.cachedImageRenderVersion=(currentImgRenderVer>0 && savedImgRenderVer>0 && savedImgRenderVer<=255)?uint8_t(savedImgRenderVer):0;
+    if(object["renderVersion"].toInt()!=2 || !imgRenderOk) {
+        value.cachedImageRenderVersion=0; value.cachedDetailsVersion=2;
+        value.duration100ns=0; value.width=0; value.height=0; value.fps=0.0;
+        value.captureTimeSec=0;
+        value.imageKind=ImageEvidenceKind::StaticImage; value.imageFrameCount=1;
+        value.videoBitrate=0; value.audioChannels=-1; value.audioSampleRate=0;
+        value.audioCodec.clear(); value.codec.clear();
+        value.metadataLoaded=false; value.frameLoaded=false;
+        value.previewFailed=false; if(!value.corrupted) value.error=S_OK;
+        value.sigFirst={}; value.sigAlt={}; value.samples.clear(); value.thumbBGRA.clear();
+    }
     // Crop and foreground subject signatures change matching evidence, not source metadata or SHA.
     if(object["evidenceVersion"].toInt()!=3 || (VideoScanner::IsImageExtension(file.fullPath) && object["imageDetailVersion"].toInt()!=1)) { value.frameLoaded=false; value.sigFirst={}; value.sigAlt={}; value.samples.clear(); value.thumbBGRA.clear(); }
     file=std::move(value); return true;
 }
 }
 QByteArray ScanCache::encodeEvidence(const VideoFileInfo& file) { return encode(file,false); }
-bool ScanCache::decodeEvidence(const QByteArray& payload,VideoFileInfo& file) { return decode(payload,file); }
+bool ScanCache::decodeEvidence(const QByteArray& payload,VideoFileInfo& file,bool allowLegacyRenderVersion) { return decode(payload,file,allowLegacyRenderVersion); }
 
 ScanCache::ScanCache(const QString& path) : connection_(QUuid::createUuid().toString()) {
     database_=QSqlDatabase::addDatabase("QSQLITE",connection_); database_.setDatabaseName(path);
@@ -205,7 +252,7 @@ ScanCache::ScanCache(const QString& path) : connection_(QUuid::createUuid().toSt
 }
 ScanCache::~ScanCache() { database_.close(); database_=QSqlDatabase(); QSqlDatabase::removeDatabase(connection_); }
 void ScanCache::ignorePair(const VideoFileInfo& a,const VideoFileInfo& b) {
-    auto pair=ReviewPairKey(a.identity,b.identity); if(!error_.isEmpty() || pair.empty()) return;
+    auto pair=ReviewPairKey(a,b); if(!error_.isEmpty() || pair.empty()) return;
     QSqlQuery query(database_); query.prepare("INSERT OR IGNORE INTO ignored_pairs_v1(pair) VALUES(?)"); query.addBindValue(QString::fromStdString(pair));
     if(!query.exec()) error_=query.lastError().text();
 }
@@ -219,7 +266,7 @@ ReviewDecisions ScanCache::reviewDecisions() {
     QSqlQuery query(database_); if(!query.exec("SELECT pair,decision FROM review_decisions_v1")) { error_=query.lastError().text(); return result; }
     while(query.next()) {
         auto pair=query.value(0).toString().toStdString(); const auto value=query.value(1).toInt();
-        if(pair.empty() || pair.size()>170 || pair.find('/')==std::string::npos || value<1 || value>3) { error_="Invalid review decision"; return {}; }
+        if(pair.empty() || pair.size()>220 || pair.find('/')==std::string::npos || value<1 || value>3) { error_="Invalid review decision"; return {}; }
         result.emplace(std::move(pair),static_cast<ReviewDecision>(value));
     }
     return result;
@@ -230,7 +277,7 @@ void ScanCache::saveReviewDecisions(const ReviewDecisions& decisions) {
     QSqlQuery query(database_);
     for(const auto& [pair,decision]:decisions) {
         const auto value=int(decision);
-        if(pair.empty() || pair.size()>170 || value<0 || value>3) { error_="Invalid review decision"; database_.rollback(); return; }
+        if(pair.empty() || pair.size()>220 || value<0 || value>3) { error_="Invalid review decision"; database_.rollback(); return; }
         query.prepare(value==0?"DELETE FROM review_decisions_v1 WHERE pair=?":"INSERT INTO review_decisions_v1(pair,decision) VALUES(?,?) ON CONFLICT(pair) DO UPDATE SET decision=excluded.decision");
         query.addBindValue(QString::fromStdString(pair)); if(value) query.addBindValue(value);
         if(!query.exec()) { error_=query.lastError().text(); database_.rollback(); return; }
@@ -350,8 +397,36 @@ bool ScanCache::restore(VideoFileInfo& file) {
     if(!query.exec()) { error_=query.lastError().text(); return false; }
     if(!query.next() || !decode(query.value(0).toByteArray(),file)) return false;
     // Identity-valid metadata and SHA remain useful; old color conversion evidence must be regenerated.
-    file.frameLoaded=false; file.sigFirst={}; file.sigAlt={}; file.samples.clear(); file.thumbBGRA.clear();
+    file.frameLoaded=false; file.previewFailed=false; if(!file.corrupted) file.error=S_OK; file.sigFirst={}; file.sigAlt={}; file.samples.clear(); file.thumbBGRA.clear();
     return true;
+}
+unsigned ScanCache::restoreBatch(std::vector<VideoFileInfo>& files,const std::atomic<bool>& cancel) {
+    if(!error_.isEmpty() || !mediaCachingEnabled_ || files.empty()) return 0;
+    QSqlQuery primary(database_);
+    if(!primary.prepare("SELECT payload FROM scan_cache_v4 WHERE path=? AND identity=?")) { error_=primary.lastError().text(); return 0; }
+    QSqlQuery legacy(database_);
+    const bool hasLegacy=!legacyTable_.isEmpty();
+    if(hasLegacy && !legacy.prepare(QString("SELECT payload FROM %1 WHERE path=? AND identity=?").arg(legacyTable_))) { error_=legacy.lastError().text(); return 0; }
+    unsigned hits=0;
+    for(auto& file:files) {
+        if(cancel.load(std::memory_order_relaxed)) break;
+        if(file.deleted || !file.identity.valid) continue;
+        const auto k=key(file); const auto id=identity(file);
+        primary.bindValue(0,k); primary.bindValue(1,id);
+        if(!primary.exec()) { error_=primary.lastError().text(); break; }
+        const bool okPrimary=primary.next() && decode(primary.value(0).toByteArray(),file);
+        primary.finish();
+        if(okPrimary) { ++hits; continue; }
+        if(!hasLegacy) continue;
+        legacy.bindValue(0,k); legacy.bindValue(1,id);
+        if(!legacy.exec()) { error_=legacy.lastError().text(); break; }
+        const bool okLegacy=legacy.next() && decode(legacy.value(0).toByteArray(),file);
+        legacy.finish();
+        if(!okLegacy) continue;
+        file.frameLoaded=false; file.previewFailed=false; if(!file.corrupted) file.error=S_OK; file.sigFirst={}; file.sigAlt={}; file.samples.clear(); file.thumbBGRA.clear();
+        ++hits;
+    }
+    return hits;
 }
 bool ScanCache::exportOperationHistory(const QString& path) {
     if(!error_.isEmpty()) return false;
@@ -378,7 +453,10 @@ void ScanCache::store(const std::vector<VideoFileInfo>& files,bool pruneNow) {
     if(!database_.transaction()) { error_=database_.lastError().text(); return; }
     QSqlQuery query(database_); query.prepare("INSERT OR REPLACE INTO scan_cache_v4(path,identity,payload) VALUES(?,?,?)");
     for(const auto& file:files) {
-        if(!file.identity.valid || file.deleted || FAILED(file.error) || file.corrupted || (!file.metadataLoaded && file.contentHash.empty())) continue;
+        const bool cacheableError=SUCCEEDED(file.error) || (file.previewFailed && (!file.contentHash.empty() || file.metadataLoaded));
+        if(!file.identity.valid || file.deleted || file.corrupted || !cacheableError || (!file.metadataLoaded && file.contentHash.empty())) continue;
+        if((file.metadataLoaded && file.cachedDetailsVersion!=2) ||
+           (file.cachedImageRenderVersion>0 && int(file.cachedImageRenderVersion)!=imageRenderVersion(file.fullPath))) continue;
         // Keep comparison evidence for large archives; visible thumbnails are decoded lazily.
         const auto evidence=encode(file,false); if(evidence.size()>131072) continue;
         query.bindValue(0,key(file)); query.bindValue(1,identity(file)); query.bindValue(2,QByteArray("CZ1")+qCompress(evidence,1));
@@ -458,7 +536,8 @@ CacheWriter::CacheWriter(QString path) : thread_([this,path=std::move(path)] {
 }) {}
 CacheWriter::~CacheWriter() { finish(); }
 void CacheWriter::submit(const VideoFileInfo& file) {
-    if(file.deleted || file.corrupted || FAILED(file.error) || (!file.metadataLoaded && file.contentHash.empty())) return;
+    const bool cacheableError=SUCCEEDED(file.error) || (file.previewFailed && (!file.contentHash.empty() || file.metadataLoaded));
+    if(file.deleted || file.corrupted || !cacheableError || (!file.metadataLoaded && file.contentHash.empty())) return;
     std::unique_lock lock(mutex_);
     changed_.wait(lock,[this] { return queue_.size()<128 || finished_ || !error_.isEmpty(); });
     if(finished_ || !error_.isEmpty()) return;

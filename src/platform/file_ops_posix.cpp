@@ -191,20 +191,45 @@ FileIdentity ReadFileIdentity(const std::wstring& path, DWORD* error) {
             FileTimeFromTimespec(ModificationTime(st)), true};
 }
 
-std::string HashFileSha256(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error) {
+std::string HashFileSha256(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error, const FileIdentity& expected) {
     error = S_OK;
-    Fd file(::open(Posix::ToUtf8(path).c_str(), O_RDONLY | O_CLOEXEC));
-    if (!file.valid()) { error = HResultFromErrno(errno); return {}; }
+    const std::string utf8Path = Posix::ToUtf8(path);
+    struct stat lst{};
+    if (lstat(utf8Path.c_str(), &lst) != 0) { error = HResultFromErrno(errno); return {}; }
+    if (!S_ISREG(lst.st_mode)) { error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED); return {}; }
+    // O_NONBLOCK prevents opening a swapped-in FIFO from blocking before fstat can reject non-regular files.
+    Fd file(::open(utf8Path.c_str(), O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK));
+    if (!file.valid()) {
+        error = (errno == ELOOP) ? HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED) : HResultFromErrno(errno);
+        return {};
+    }
+    struct stat st{};
+    if (fstat(file.value, &st) != 0) { error = HResultFromErrno(errno); return {}; }
+    if (!S_ISREG(st.st_mode)) { error = HRESULT_FROM_WIN32(ERROR_NOT_SUPPORTED); return {}; }
+    const FileIdentity opened{
+        static_cast<uint64_t>(st.st_dev),
+        static_cast<uint64_t>(st.st_ino),
+        static_cast<uint64_t>(st.st_size),
+        FileTimeFromTimespec(ModificationTime(st)),
+        true
+    };
+    if (expected.valid && opened != expected) { error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID); return {}; }
+    if (const int flags = fcntl(file.value, F_GETFL); flags >= 0 && (flags & O_NONBLOCK)) {
+        (void)fcntl(file.value, F_SETFL, flags & ~O_NONBLOCK);
+    }
     struct AVSHA* sha = av_sha_alloc();
     if (!sha || av_sha_init(sha, 256) < 0) { av_free(sha); error = E_OUTOFMEMORY; return {}; }
     std::vector<uint8_t> buffer(1024 * 1024);
+    uint64_t totalRead = 0;
     while (!cancel.load()) {
         const ssize_t read = ::read(file.value, buffer.data(), buffer.size());
         if (read < 0) { if (errno == EINTR) continue; error = HResultFromErrno(errno); break; }
         if (read == 0) break;
+        totalRead += static_cast<uint64_t>(read);
         av_sha_update(sha, buffer.data(), static_cast<size_t>(read));
     }
     if (cancel.load()) error = HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    if (SUCCEEDED(error) && totalRead != opened.size) error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
     std::array<uint8_t, 32> digest{};
     if (SUCCEEDED(error)) av_sha_final(sha, digest.data());
     av_free(sha);
@@ -241,7 +266,7 @@ FileOperations::TransferResult TransferFile(
     if (ReadFileIdentity(source) != expected) { result.error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID); return result; }
     // A read-only source is not moved, as on Windows.
     if (kind == TransferKind::Move && access(nativeSource.c_str(), W_OK) != 0) { result.error = HRESULT_FROM_WIN32(ERROR_ACCESS_DENIED); return result; }
-    result.contentHash = HashFileSha256(source, cancel, result.error);
+    result.contentHash = HashFileSha256(source, cancel, result.error, expected);
     if (FAILED(result.error)) return result;
     if (!expectedHash.empty() && result.contentHash != expectedHash) { result.error = HRESULT_FROM_WIN32(ERROR_CRC); return result; }
     if (kind == TransferKind::Move && allowSameVolumeRename && DeviceOfFolder(nativeDestination) == expected.volume) {
@@ -289,7 +314,7 @@ FileOperations::TransferResult TransferFile(
     }
     if (ReadFileIdentity(source) != expected) return discardCopy(HRESULT_FROM_WIN32(ERROR_FILE_INVALID));
     HRESULT hashError = S_OK;
-    const auto destinationHash = HashFileSha256(destination, cancel, hashError);
+    const auto destinationHash = HashFileSha256(destination, cancel, hashError, result.destinationIdentity);
     if (FAILED(hashError)) return discardCopy(hashError);
     if (destinationHash != result.contentHash) return discardCopy(HRESULT_FROM_WIN32(ERROR_CRC));
     if (kind == TransferKind::Move) {
@@ -331,10 +356,10 @@ FileOperations::TransferResult UndoTransferFile(
         result.error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
         return result;
     }
-    const auto originalHash = HashFileSha256(source, cancel, result.error);
+    const auto originalHash = HashFileSha256(source, cancel, result.error, originalSource);
     if (FAILED(result.error)) return result;
     if (originalHash != hash) { result.error = HRESULT_FROM_WIN32(ERROR_CRC); return result; }
-    const auto destinationHash = HashFileSha256(destination, cancel, result.error);
+    const auto destinationHash = HashFileSha256(destination, cancel, result.error, createdDestination);
     if (FAILED(result.error)) return result;
     if (destinationHash != hash) { result.error = HRESULT_FROM_WIN32(ERROR_CRC); return result; }
     if (cancel.load()) { result.error = HRESULT_FROM_WIN32(ERROR_CANCELLED); return result; }

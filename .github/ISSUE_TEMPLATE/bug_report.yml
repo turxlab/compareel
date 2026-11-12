@@ -41,7 +41,7 @@ body:
     attributes:
       label: Compareel version
       description: "Shown in Help > About Compareel, or Compareel > About Compareel in the macOS app menu."
-      placeholder: "1.0.0"
+      placeholder: "1.1.0"
     validations:
       required: true
 

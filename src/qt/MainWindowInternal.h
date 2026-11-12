@@ -10,6 +10,7 @@
 #include <QElapsedTimer>
 #include <QFileInfo>
 #include <QKeySequence>
+#include <QMessageBox>
 #include <QStandardPaths>
 #include <QToolButton>
 #include <QTreeWidget>
@@ -58,6 +59,18 @@ inline QToolButton* tool(QWidget* parent, Glyph glyph, const char* label, std::f
     button->setAccessibleName(text(label));
     QObject::connect(button, &QToolButton::clicked, parent, std::move(clicked));
     return button;
+}
+inline QMessageBox::StandardButton plainQuestion(QWidget* parent, const QString& title, const QString& body,
+                                                 QMessageBox::StandardButtons buttons, QMessageBox::StandardButton defaultButton) {
+    QMessageBox box(QMessageBox::Question, title, body, buttons, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.setDefaultButton(defaultButton);
+    return static_cast<QMessageBox::StandardButton>(box.exec());
+}
+inline void plainWarning(QWidget* parent, const QString& title, const QString& body) {
+    QMessageBox box(QMessageBox::Warning, title, body, QMessageBox::Ok, parent);
+    box.setTextFormat(Qt::PlainText);
+    box.exec();
 }
 // Shortcut hints in translated text are written as on Windows ("Ctrl+L"); macOS shows them as "⌘L".
 // Mac keyboards have no forward Delete key; Finder moves files to the Trash with ⌘⌫, so that is added there.

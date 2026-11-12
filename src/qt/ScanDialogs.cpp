@@ -6,6 +6,7 @@
 #include "ScanCache.h"
 #include <QAbstractItemView>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDateTime>
 #include <QDialogButtonBox>
 #include <QDir>
@@ -27,6 +28,7 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <algorithm>
+#include <cmath>
 
 using Language::text;
 
@@ -148,26 +150,50 @@ bool ScanSourcesDialog::applyTo(std::vector<std::wstring>& folders, ScanCriteria
     return true;
 }
 
-ScanRulesDialog::ScanRulesDialog(const ScanCriteria& options, bool customProfileActive, QWidget* parent)
-    : QDialog(parent) {
+ScanRulesDialog::ScanRulesDialog(const ScanCriteria& options, int activeProfile, QWidget* parent)
+    : QDialog(parent), initialMinBytes_(options.minFileSize), initialMaxBytes_(options.maxFileSize) {
     setObjectName("advancedSettingsDialog"); setWindowTitle(text("Scan rules…")); resize(620,0);
+    const bool customProfileActive = (activeProfile == 2);
     auto layout=new QVBoxLayout(this); layout->setContentsMargins(22,22,22,22); layout->setSpacing(12);
     auto form=new QFormLayout; form->setSpacing(10); auto filters=new QFormLayout; filters->setSpacing(10); auto performance=new QFormLayout; performance->setSpacing(10);
-    minimum_=new QDoubleSpinBox(this); minimum_->setRange(0,1000000); minimum_->setValue(double(options.minFileSize)/(1024*1024));
-    maximum_=new QDoubleSpinBox(this); maximum_->setRange(0,1000000); maximum_->setValue(options.maxFileSize==UINT64_MAX?0:double(options.maxFileSize)/(1024*1024));
+    auto initSizeControl=[this](uint64_t bytes, bool isMax, QDoubleSpinBox*& spin, QComboBox*& unit) -> QWidget* {
+        int unitIdx = 1; // MB default
+        double value = 0.0;
+        if(isMax && bytes==UINT64_MAX) { unitIdx=1; value=0.0; }
+        else if(!isMax && bytes<=1) { unitIdx=1; value=0.0; }
+        else if(bytes>=1024ULL*1024ULL*1024ULL && (bytes%(1024ULL*1024ULL*1024ULL)==0)) { unitIdx=2; value=double(bytes)/(1024.0*1024.0*1024.0); }
+        else if(bytes>=1024ULL*1024ULL) { unitIdx=1; value=double(bytes)/(1024.0*1024.0); }
+        else { unitIdx=0; value=double(bytes)/1024.0; }
+        auto row=new QWidget(this); auto rowLayout=new QHBoxLayout(row); rowLayout->setContentsMargins(0,0,0,0); rowLayout->setSpacing(6);
+        spin=new QDoubleSpinBox(row); spin->setRange(0,100000000); spin->setDecimals(2); spin->setValue(value);
+        unit=new QComboBox(row); unit->addItems({"KB","MB","GB"}); unit->setCurrentIndex(unitIdx);
+        rowLayout->addWidget(spin,1); rowLayout->addWidget(unit);
+        return row;
+    };
+    auto minRow=initSizeControl(options.minFileSize,false,minimum_,minUnit_); minimum_->setObjectName("minimumSizeSpin"); minUnit_->setObjectName("minimumSizeUnit");
+    auto maxRow=initSizeControl(options.maxFileSize,true,maximum_,maxUnit_); maximum_->setObjectName("maximumSizeSpin"); maxUnit_->setObjectName("maximumSizeUnit");
+    connect(minimum_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this] { minEdited_=true; });
+    connect(minUnit_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this] { minEdited_=true; });
+    connect(maximum_,QOverload<double>::of(&QDoubleSpinBox::valueChanged),this,[this] { maxEdited_=true; });
+    connect(maxUnit_,QOverload<int>::of(&QComboBox::currentIndexChanged),this,[this] { maxEdited_=true; });
     extensions_=new QLineEdit(this); extensions_->setObjectName("includedExtensionsEdit"); QStringList ext; for(auto value:options.extensions) ext<<QString::fromStdWString(value); extensions_->setText(ext.join(", ")); extensions_->setPlaceholderText("mp4, mkv, mov, webm");
     excludedExtensions_=new QLineEdit(this); excludedExtensions_->setObjectName("advancedExcludedExtensionsEdit"); QStringList exclExt; for(auto value:options.excludedExtensions) exclExt<<QString::fromStdWString(value); excludedExtensions_->setText(exclExt.join(", ")); excludedExtensions_->setPlaceholderText(text("None (for example: gif, webp, svg)"));
     workers_=new QSpinBox(this); workers_->setRange(1,16); workers_->setValue(options.workerCount);
     threshold_=new QDoubleSpinBox(this); threshold_->setObjectName("advancedSimilarityThreshold"); threshold_->setRange(70,100); threshold_->setSuffix(" %"); threshold_->setValue(options.minFrameSimilarity);
     tolerance_=new QDoubleSpinBox(this); tolerance_->setRange(0,60); tolerance_->setDecimals(2); tolerance_->setValue(options.durationTol100ns/10000000.0);
     // Sections: how files are matched, the custom criteria, which files are read, and how fast.
-    filters->addRow(text("Minimum size (MB)"),minimum_); filters->addRow(text("Maximum size (MB, 0 = unlimited)"),maximum_);
+    filters->addRow(text("Minimum size"),minRow); filters->addRow(text("Maximum size (0 = unlimited)"),maxRow);
     filters->addRow(text(options.images?"Image extensions":"Video extensions"),extensions_);
     filters->addRow(text("Excluded extensions"),excludedExtensions_);
     performance->addRow(text("Parallel reads"),workers_);
     form->addRow(text("Similarity threshold"),threshold_); form->addRow(text("Duration tolerance (seconds)"),tolerance_);
     auto matching=new QGroupBox(text("Matching"),this); auto matchingLayout=new QVBoxLayout(matching); matchingLayout->addLayout(form); layout->addWidget(matching);
     transforms_=new QCheckBox(text("Recognize black borders, mirrored and rotated copies"),this); transforms_->setChecked(options.matchTransforms); matchingLayout->addWidget(transforms_);
+    if(activeProfile==0) {
+        threshold_->setEnabled(false); tolerance_->setEnabled(false); transforms_->setEnabled(false);
+        auto exactNote=new QLabel(text("Exact copies compares full file contents; visual matching rules are not used in this mode."),matching);
+        exactNote->setObjectName("secondary"); exactNote->setWordWrap(true); matchingLayout->addWidget(exactNote);
+    }
     size_=new QCheckBox(text("Same file size"),this); size_->setChecked(options.matchSize);
     durationCheck_=new QCheckBox(text("Same duration"),this); durationCheck_->setChecked(options.matchDuration);
     if(options.images) { durationCheck_->setChecked(false); durationCheck_->hide(); form->setRowVisible(tolerance_,false); extensions_->setPlaceholderText("jpg, jpeg, png, webp, heic, heif, avif, bmp, gif, tif, tga, ico, svg, psd, jxl, jp2, exr, hdr, dds, pcx, dng, cr2, nef, arw"); }
@@ -176,7 +202,18 @@ ScanRulesDialog::ScanRulesDialog(const ScanCriteria& options, bool customProfile
     fileNameCheck_=new QCheckBox(text("Same file name"),this); fileNameCheck_->setObjectName("matchFileNameCheck"); fileNameCheck_->setChecked(options.matchFileName);
     extensionCheck_=new QCheckBox(text("Same file extension"),this); extensionCheck_->setObjectName("matchExtensionCheck"); extensionCheck_->setChecked(options.matchExtension);
     auto custom=new QGroupBox(text("Advanced criteria"),this); custom->setObjectName("customCriteriaGroup"); auto customLayout=new QGridLayout(custom);
-    int cell=0; for(auto box:{size_,durationCheck_,resolution_,first_,fileNameCheck_,extensionCheck_}) { customLayout->addWidget(box,cell/2,cell%2); ++cell; }
+    int cell=0; for(auto box:{size_,durationCheck_,resolution_,first_,fileNameCheck_,extensionCheck_}) { box->setEnabled(customProfileActive); customLayout->addWidget(box,cell/2,cell%2); ++cell; }
+    if(customProfileActive) {
+        auto syncMatching=[this,isImages=options.images] {
+            const bool visual=first_->isChecked();
+            threshold_->setEnabled(visual);
+            transforms_->setEnabled(visual);
+            tolerance_->setEnabled(!isImages && durationCheck_->isChecked());
+        };
+        connect(first_,&QCheckBox::toggled,this,syncMatching);
+        connect(durationCheck_,&QCheckBox::toggled,this,syncMatching);
+        syncMatching();
+    }
     layout->addWidget(custom);
     auto note=new QLabel(text("Advanced criteria find candidates; they do not prove identical content."),this); note->setWordWrap(true); note->setObjectName("secondary"); customLayout->addWidget(note,3,0,1,2);
     if(!customProfileActive) { auto inactive=new QLabel(text("These rules apply when the comparison mode is Advanced criteria."),custom); inactive->setObjectName("secondary"); inactive->setWordWrap(true); customLayout->addWidget(inactive,4,0,1,2); }
@@ -187,9 +224,16 @@ ScanRulesDialog::ScanRulesDialog(const ScanCriteria& options, bool customProfile
 }
 
 bool ScanRulesDialog::applyTo(ScanCriteria& options, QWidget* messageParent) const {
-    if(maximum_->value()>0 && minimum_->value()>maximum_->value()) { QMessageBox::information(messageParent,text("Scan rules…"),text("Minimum size cannot exceed maximum size.")); return false; }
-    options.minFileSize=std::max<uint64_t>(1,static_cast<uint64_t>(minimum_->value()*1024*1024));
-    options.maxFileSize=maximum_->value()==0?UINT64_MAX:static_cast<uint64_t>(maximum_->value()*1024*1024);
+    auto unitBytes=[](int idx) -> uint64_t { return idx==0?1024ULL:idx==2?(1024ULL*1024ULL*1024ULL):(1024ULL*1024ULL); };
+    const uint64_t minBytes=minEdited_
+        ? std::max<uint64_t>(1,static_cast<uint64_t>(std::llround(minimum_->value()*double(unitBytes(minUnit_->currentIndex())))))
+        : initialMinBytes_;
+    const uint64_t maxBytes=maxEdited_
+        ? (maximum_->value()<=0.0?UINT64_MAX:std::max<uint64_t>(1,static_cast<uint64_t>(std::llround(maximum_->value()*double(unitBytes(maxUnit_->currentIndex()))))))
+        : initialMaxBytes_;
+    if(maxBytes!=UINT64_MAX && minBytes>maxBytes) { QMessageBox::information(messageParent,text("Scan rules…"),text("Minimum size cannot exceed maximum size.")); return false; }
+    options.minFileSize=minBytes;
+    options.maxFileSize=maxBytes;
     options.extensions.clear(); for(auto extension:extensions_->text().split(',',Qt::SkipEmptyParts)) { extension=extension.trimmed().toLower(); if(!extension.startsWith('.')) extension.prepend('.'); options.extensions.push_back(extension.toStdWString()); }
     options.excludedExtensions.clear(); for(auto extension:excludedExtensions_->text().split(',',Qt::SkipEmptyParts)) { extension=extension.trimmed().toLower(); if(!extension.startsWith('.')) extension.prepend('.'); if(extension.size()>1) options.excludedExtensions.push_back(extension.toStdWString()); }
     options.matchTransforms=transforms_->isChecked();

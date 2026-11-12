@@ -5,6 +5,7 @@
 #include <vector>
 
 class QCheckBox;
+class QComboBox;
 class QDoubleSpinBox;
 class QLineEdit;
 class QListWidget;
@@ -28,12 +29,19 @@ private:
 
 class ScanRulesDialog final : public QDialog {
 public:
-    ScanRulesDialog(const ScanCriteria& options, bool customProfileActive, QWidget* parent = nullptr);
+    ScanRulesDialog(const ScanCriteria& options, int activeProfile, QWidget* parent = nullptr);
+    ScanRulesDialog(const ScanCriteria&, bool, QWidget* = nullptr) = delete;
     bool applyTo(ScanCriteria& options, QWidget* messageParent) const;
 
 private:
+    uint64_t initialMinBytes_ = 1;
+    uint64_t initialMaxBytes_ = UINT64_MAX;
+    bool minEdited_ = false;
+    bool maxEdited_ = false;
     QDoubleSpinBox* minimum_ = nullptr;
     QDoubleSpinBox* maximum_ = nullptr;
+    QComboBox* minUnit_ = nullptr;
+    QComboBox* maxUnit_ = nullptr;
     QLineEdit* extensions_ = nullptr;
     QLineEdit* excludedExtensions_ = nullptr;
     QSpinBox* workers_ = nullptr;

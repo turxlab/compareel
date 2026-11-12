@@ -166,7 +166,7 @@ int CompareFileNamesNatural(const std::wstring& a, const std::wstring& b) {
     return 0;
 }
 
-bool StatRegularFile(const std::wstring& path, uint64_t& outSize, uint64_t& outLastWriteTime) {
+bool StatRegularFile(const std::wstring& path, uint64_t& outSize, uint64_t& outLastWriteTime, uint64_t* outCreatedTime) {
     WIN32_FILE_ATTRIBUTE_DATA fad{};
     if (!GetFileAttributesExW(NativeFilePath(path).c_str(), GetFileExInfoStandard, &fad) ||
         (fad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
@@ -175,7 +175,16 @@ bool StatRegularFile(const std::wstring& path, uint64_t& outSize, uint64_t& outL
     outSize = (static_cast<uint64_t>(fad.nFileSizeHigh) << 32) | fad.nFileSizeLow;
     outLastWriteTime = (static_cast<uint64_t>(fad.ftLastWriteTime.dwHighDateTime) << 32) |
                        fad.ftLastWriteTime.dwLowDateTime;
+    if (outCreatedTime) {
+        *outCreatedTime = (static_cast<uint64_t>(fad.ftCreationTime.dwHighDateTime) << 32) |
+                          fad.ftCreationTime.dwLowDateTime;
+    }
     return true;
+}
+
+uint64_t ReadFileCreationTime(const std::wstring& path) {
+    uint64_t size = 0, modified = 0, created = 0;
+    return StatRegularFile(path, size, modified, &created) ? created : 0;
 }
 
 bool EnumerateDirectory(const std::wstring& directory,
@@ -222,6 +231,8 @@ bool EnumerateDirectory(const std::wstring& directory,
             entry.fileSize = (static_cast<uint64_t>(fd.nFileSizeHigh) << 32) | fd.nFileSizeLow;
             entry.lastWriteTime = (static_cast<uint64_t>(fd.ftLastWriteTime.dwHighDateTime) << 32) |
                                   fd.ftLastWriteTime.dwLowDateTime;
+            entry.createdTime = (static_cast<uint64_t>(fd.ftCreationTime.dwHighDateTime) << 32) |
+                                fd.ftCreationTime.dwLowDateTime;
         }
         onEntry(std::move(entry));
     } while (FindNextFileW(hFind, &fd) && !cancelFlag.load(std::memory_order_relaxed));

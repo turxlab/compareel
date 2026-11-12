@@ -6,13 +6,18 @@
 # Usage: tools/build-flatpak.sh <version>
 set -euo pipefail
 VERSION=${1:?usage: tools/build-flatpak.sh <version>}
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-.][A-Za-z0-9.-]+)?$ ]] || { echo "Invalid version." >&2; exit 2; }
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 WORK=${FLATPAK_WORK:-$ROOT/.deps/flatpak}
 OUT="$ROOT/release/v$VERSION"
+MANIFEST="$ROOT/packaging/linux/.flatpak-manifest.yml"
+trap 'rm -f "$MANIFEST"' EXIT
+sed "s/-DCOMPAREEL_DISPLAY_VERSION=[^], ]*/-DCOMPAREEL_DISPLAY_VERSION=$VERSION/" \
+    "$ROOT/packaging/linux/io.github.turxlab.Compareel.yml" > "$MANIFEST"
 mkdir -p "$WORK" "$OUT"
 flatpak remote-add --user --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo
 flatpak-builder --user --install-deps-from=flathub --force-clean --disable-rofiles-fuse --ccache \
-    --state-dir="$WORK/state" --repo="$WORK/repo" "$WORK/build" "$ROOT/packaging/linux/io.github.turxlab.Compareel.yml"
+    --state-dir="$WORK/state" --repo="$WORK/repo" "$WORK/build" "$MANIFEST"
 flatpak build-bundle "$WORK/repo" "$OUT/Compareel-$VERSION-x86_64.flatpak" io.github.turxlab.Compareel \
     --runtime-repo=https://dl.flathub.org/repo/flathub.flatpakrepo
 echo "Flatpak ready: $OUT/Compareel-$VERSION-x86_64.flatpak"

@@ -5,6 +5,9 @@
 struct ScanMetrics {
     int64_t readMs=0, sampleMs=0, groupMs=0;
     size_t inputCandidates=0, sampleCandidates=0, durationRejected=0;
+    size_t discoveredFiles=0, outsideSizeLimits=0, skippedUniqueSize=0;
+    bool compactedFiles=false;
+    std::vector<std::wstring> lowVarianceSkipped;
     unsigned requestedWorkers=0, readWorkers=0, sampleWorkers=0, volumeCap=0;
     int primaryStorageTier=0;
 };
@@ -65,6 +68,12 @@ public:
         const std::vector<VideoFileInfo>& files,
         std::vector<VideoGroup>& groups,
         SortOrder order, bool matchTransforms = true);
+
+    // Compute real visual/content similarity (0..100) between two files
+    static double ComputePairSimilarity(
+        const VideoFileInfo& a,
+        const VideoFileInfo& b,
+        bool matchTransforms = true);
 
     // Check if two files match under the active criteria
     static bool FilesMatch(

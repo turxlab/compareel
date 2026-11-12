@@ -272,13 +272,14 @@ NativeMediaResult TryExtractNativeMetadata(VideoFileInfo& info,
     }
     SafeRelease(&pReader);
     if (cancel && cancel->load()) return NativeMediaResult::Cancelled;
-    info.metadataLoaded = true;
-    info.corrupted = (info.width == 0 || info.height == 0);
-    if (info.corrupted) {
+    if (info.width == 0 || info.height == 0) {
         outError = MF_E_INVALIDMEDIATYPE;
         outMarkLoadedOnFailure = true;
         return NativeMediaResult::FallbackToFFmpeg;
     }
+    info.metadataLoaded = true;
+    info.corrupted = false;
+    info.previewFailed = false;
     return NativeMediaResult::Succeeded;
 }
 
@@ -339,14 +340,14 @@ NativeMediaResult TryExtractNativeFrames(VideoFileInfo& info,
         SafeRelease(&pCurrentType);
     }
 
-    info.metadataLoaded = true;
     if (info.width == 0 || info.height == 0) {
-        info.error = MF_E_INVALIDMEDIATYPE;
-        info.corrupted = true;
-        info.frameLoaded = true;
         SafeRelease(&pReader);
-        return NativeMediaResult::HardFailed;
+        outError = MF_E_INVALIDMEDIATYPE;
+        outCorruptedOnFailure = true;
+        outMarkLoadedOnFailure = true;
+        return NativeMediaResult::FallbackToFFmpeg;
     }
+    info.metadataLoaded = true;
 
     std::vector<uint8_t> scratch;
     // Reuse the RGB buffer across seeks; frame timestamps and image evidence are unchanged.

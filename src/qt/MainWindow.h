@@ -19,7 +19,7 @@
 #include <optional>
 
 // Which file of each group is the reference (left, and kept by default). Values are stored in settings and sessions.
-enum class ReferenceRule { HighestResolution=0, LargestFile=1, LongestDuration=2, OldestFile=3, NewestFile=4, NameOrder=5 };
+enum class ReferenceRule { HighestResolution=0, LargestFile=1, LongestDuration=2, OldestFile=3, NewestFile=4, NameOrder=5, OldestCreated=6, OldestCaptureDate=7 };
 
 class QLabel;
 class QSlider;
@@ -97,7 +97,8 @@ public:
     // The other file of the pair; differing metadata values are highlighted against it.
     void setPeer(const VideoFileInfo* other);
     void setMediaMode(bool images) { still_=images; transport_->setVisible(!images); }
-    bool animationReady() const { return imageSequence_.kind==ImageEvidenceKind::AnimatedImage && imageSequence_.playbackFrames.size()>1; }
+    int loadedAnimationFrames() const { return int(std::min(imageSequence_.playbackFrames.size(),imageSequence_.frameDurations.size())); }
+    bool animationReady() const { return imageSequence_.kind==ImageEvidenceKind::AnimatedImage && loadedAnimationFrames()>1; }
     bool imagePlaying() const { return imagePlaying_; }
     bool imageReady() const { return !still_ || bool(canvas->frame()); }
     bool imageDocument() const { return imageSequence_.kind==ImageEvidenceKind::MultiPageDocument; }
@@ -125,7 +126,7 @@ private:
     QElapsedTimer imageClock_;
     QWidget* transport_;
     int activeRightSlot_ = 1, activeGroupTotal_ = 0;
-    struct PeerInfo { bool valid=false; uint64_t size=0; int64_t duration=0; uint32_t width=0,height=0; std::wstring codec; };
+    struct PeerInfo { bool valid=false,metadataLoaded=false,captureKnown=false; uint64_t size=0; int64_t duration=0; uint32_t width=0,height=0; int64_t captureTimeSec=0; std::wstring codec; };
     PeerInfo self_, peer_;
     QString path_;
     QLabel *role_, *folderTitle_, *metadata_, *time_, *frameCount_;
@@ -198,7 +199,7 @@ private:
     QFutureWatcher<PartialClipSearch::Result>* partialSearchWatcher_=nullptr;
     void findPartialClips();
     QComboBox* evidenceFilter_=nullptr;
-    struct ScanResult { std::vector<VideoFileInfo> files; std::vector<VideoGroup> groups; std::vector<ScanIssue> issues; ScanMetrics metrics; QString error; QString cacheError; unsigned cacheHits=0,changedFiles=0; bool cancelled = false,manual=false,restored=false; };
+    struct ScanResult { std::vector<VideoFileInfo> files; std::vector<VideoGroup> groups; std::vector<ScanIssue> issues; std::set<std::string> ignoredPairs; ScanMetrics metrics; QString error; QString cacheError; unsigned cacheHits=0,changedFiles=0; bool cancelled = false,manual=false,restored=false; };
     void createActions();
     void createLayout();
     void translate();
@@ -268,7 +269,9 @@ private:
         SizeLargest,
         SizeSmallest,
         ModifiedNewest,
-        ModifiedOldest
+        ModifiedOldest,
+        CreatedOldest,
+        CaptureOldest
     };
     struct CleanupRetentionRule {
         RetentionAttribute attribute = RetentionAttribute::CurrentSortOrder;
@@ -286,6 +289,7 @@ private:
     bool markCleanupInProgress();
     void finishCleanupRecovery();
     void setReviewDecision(ReviewDecision decision);
+    ReviewDecision pairDecision(int a,int b) const;
     ReviewDecision currentReviewDecision() const;
     void showGroupPosition(const QString& state={});
     void refreshReviewDecisions();
@@ -320,10 +324,13 @@ private:
     bool exportResultsFile(const QString& path);
     void openTwoFiles();
     void applyFilter();
+    int adjacentVisibleGroup(int fromGroup,int step) const;
+    void updateGroupNavigationActions();
+    enum class SessionSaveStatus { Saved, BusyOrInvalid, LowMemory, LimitExceeded, WriteFailed };
     void saveSession();
     void loadSession();
-    bool saveSessionFile(const QString& path);
-    std::function<bool()> sessionSaveJob(const QString& path,std::shared_ptr<std::atomic<bool>> cancelled={});
+    bool saveSessionFile(const QString& path,SessionSaveStatus* status=nullptr);
+    std::function<bool()> sessionSaveJob(const QString& path,std::shared_ptr<std::atomic<bool>> cancelled={},std::shared_ptr<SessionSaveStatus> status={});
     bool saveLastReview(bool force=false);
     bool loadSessionFile(const QString& path,bool rebuildLegacy=false);
     bool legacySessionNeedsScan_=false;
@@ -343,6 +350,7 @@ private:
     bool scanning_ = false, pendingClose_ = false, syncing_ = false, manual_ = false;
     bool closing_=false,closeReady_=false;
     bool pausedScan_=false;
+    bool scanPausable_=false;
     bool clearingCache_=false;
     bool fileOperationPending_=false;
     std::atomic<bool> bulkCancel_{false};
@@ -383,6 +391,7 @@ private:
     std::optional<std::vector<VideoFileInfo>> restoredFiles_;
     std::optional<std::vector<VideoGroup>> restoredGroups_;
     std::vector<ScanIssue> restoredIssues_;
+    ScanMetrics restoredMetrics_;
     bool savedResultEvidence_=false;
     bool restoreManual_=false;
     QString restoreLeft_,restoreRight_;
@@ -410,7 +419,7 @@ private:
     void makeReference(int groupIndex,int slot);
     bool canBeReference(const VideoGroup& group,int member) const;
     bool matchesWholeGroup(const VideoGroup& group,int member) const;
-    void readMetadata(std::vector<std::pair<int,VideoFileInfo>>& missing,std::atomic<bool>& cancel,std::atomic<int>* done=nullptr);
+    void readMetadata(std::vector<std::pair<int,VideoFileInfo>>& missing,std::atomic<bool>& cancel,std::atomic<int>* done=nullptr,bool sampleVideos=false);
     void mergeMetadata(std::vector<std::pair<int,VideoFileInfo>>& result);
     bool leftOnlySorting_=false;
     QSpinBox* similarityThreshold_=nullptr;

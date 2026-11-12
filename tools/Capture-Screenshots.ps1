@@ -3,7 +3,7 @@
 # and captures only the Compareel window via PrintWindow (never the desktop).
 
 param(
-    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'release\v1.0.0\Compareel\Compareel.exe'),
+    [string]$Exe = (Join-Path (Split-Path -Parent $PSScriptRoot) 'release\v1.1.0\Compareel\Compareel.exe'),
     [string]$Demo = 'C:\programs\compareel-demo',
     [string]$OutDir = (Join-Path (Split-Path -Parent $PSScriptRoot) 'docs-site\assets'),
     [int]$Width = 1280,

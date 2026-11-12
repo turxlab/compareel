@@ -34,10 +34,35 @@ struct FileIdentity {
     bool operator==(const FileIdentity&) const = default;
 };
 
+inline bool HasUniqueFileIndex(const FileIdentity& id) {
+    return id.valid && id.index != 0 && id.index != ~uint64_t{0};
+}
+
+inline std::string FileReviewId(const FileIdentity& value, std::wstring_view normalizedPathKey = {}) {
+    if (!value.valid) return {};
+    std::string key = std::to_string(value.volume) + ":" + std::to_string(value.index) + ":" +
+                      std::to_string(value.size) + ":" + std::to_string(value.modified);
+    if (!HasUniqueFileIndex(value) && !normalizedPathKey.empty()) {
+        uint64_t hash = 14695981039346656037ULL;
+        for (wchar_t ch : normalizedPathKey) {
+            uint32_t cp = static_cast<uint32_t>(ch);
+            for (int b = 0; b < 4; ++b) {
+                hash ^= static_cast<uint8_t>((cp >> (b * 8)) & 0xFFu);
+                hash *= 1099511628211ULL;
+            }
+        }
+        char hexBuf[18];
+        std::snprintf(hexBuf, sizeof(hexBuf), ":%016llx", static_cast<unsigned long long>(hash));
+        key += hexBuf;
+    }
+    return key;
+}
+
 inline std::string ReviewPairKey(const FileIdentity& a,const FileIdentity& b) {
     if(!a.valid || !b.valid) return {};
-    auto key=[](const FileIdentity& value) { return std::to_string(value.volume)+":"+std::to_string(value.index)+":"+std::to_string(value.size)+":"+std::to_string(value.modified); };
-    auto left=key(a),right=key(b); if(right<left) std::swap(left,right); return left+"/"+right;
+    auto left=FileReviewId(a),right=FileReviewId(b);
+    if(right<left) std::swap(left,right);
+    return left+"/"+right;
 }
 enum class ReviewDecision { Unreviewed=0, Reviewed=1, KeepBoth=2, Later=3 };
 using ReviewDecisions=std::map<std::string,ReviewDecision>;
@@ -105,7 +130,6 @@ struct VideoFileInfo {
     int64_t      duration100ns = 0;      // Duration in 100-nanosecond units (10,000,000 = 1 sec)
     uint32_t     width         = 0;
     uint32_t     height        = 0;
-    uint64_t     lastWriteTime = 0;
     FileIdentity identity;
     bool         protectedFile = false;
     bool         protectedByFolder = false;
@@ -118,12 +142,17 @@ struct VideoFileInfo {
     std::string  contentHash;
     std::vector<FrameSignature> samples;
     int comparisonRoot = -1;
+    uint64_t     createdTime   = 0;      // File creation time in 100-ns FILETIME units (0 if unavailable)
+    int64_t      captureTimeSec = 0;     // EXIF DateTimeOriginal/Digitized wall-clock seconds (0 if unavailable)
     ImageEvidenceKind imageKind = ImageEvidenceKind::StaticImage;
     uint32_t imageFrameCount = 1;
+    uint8_t  cachedImageRenderVersion = 0; // 0 = current imageRenderVersion(fullPath); >0 = preserved legacy snapshot version
+    uint8_t  cachedDetailsVersion = 2;     // Preserves legacy snapshot detailsVersion until re-analyzed
 
     bool         metadataLoaded = false;
     bool         frameLoaded    = false;
     bool         corrupted      = false;
+    bool         previewFailed  = false;
     bool         deleted        = false;
 
     FrameSignature sigFirst;             // Signature at t = 0.0s (very first frame)
@@ -148,7 +177,9 @@ enum class SortOrder {
     DurationAsc,        // Süre (Kısadan Uzuna)
     ResolutionDesc,     // Çözünürlük (Yüksekten Düşüğe)
     ResolutionAsc,      // Çözünürlük (Düşükten Yükseğe)
-    NameAsc             // Dosya Adı (A -> Z)
+    NameAsc,            // Dosya Adı (A -> Z)
+    SimilarityDesc,     // Benzerlik (Yüksekten Düşüğe)
+    SimilarityAsc       // Benzerlik (Düşükten Yükseğe)
 };
 
 struct ScanCriteria {
@@ -188,7 +219,7 @@ struct VideoGroup {
     std::vector<int> fileIndices;   // Indices into allFiles, sorted by active SortOrder
     int leftSlot  = 0;              // Default 0 (first item in sorted order)
     int rightSlot = 1;              // Default 1 (second item in sorted order)
-    double bestFrameSim = 100.0;    // Similarity score for display
+    double bestFrameSim = 0.0;      // Measured active-pair similarity (0 = unmeasured)
     bool manualReference = false;   // Slot 0 was chosen by the user (Make reference, Open two files); rules leave it in place
 };
 

@@ -20,11 +20,11 @@ Get the packages from the [latest release page](https://github.com/turxlab/compa
 
 | Platform | File | Notes |
 | --- | --- | --- |
-| Windows 10/11 (x64) | [Compareel-1.0.0-x86_64-Win.exe](https://github.com/turxlab/compareel/releases/latest) | Installer (current user without admin rights, or all users) |
-| Windows 10/11 (x64) | [Compareel-1.0.0-x86_64-Win.zip](https://github.com/turxlab/compareel/releases/latest) | Portable archive; keep `Compareel.exe` with its DLL and plugin folders |
-| macOS 12+ | [Compareel-1.0.0.dmg](https://github.com/turxlab/compareel/releases/latest) | Universal disk image for Apple Silicon and Intel |
-| Linux (x86_64) | [Compareel-1.0.0-x86_64.flatpak](https://github.com/turxlab/compareel/releases/latest) | Flatpak bundle (`io.github.turxlab.Compareel`); Flathub publishing is planned for later |
-| Source code | [Compareel-1.0.0-source.zip](https://github.com/turxlab/compareel/releases/latest) | Complete source for Compareel, bundled third-party libraries and build scripts |
+| Windows 10/11 (x64) | [Compareel-1.1.0-x86_64-Win.exe](https://github.com/turxlab/compareel/releases/latest) | Installer (current user without admin rights, or all users) |
+| Windows 10/11 (x64) | [Compareel-1.1.0-x86_64-Win.zip](https://github.com/turxlab/compareel/releases/latest) | Portable archive; keep `Compareel.exe` with its DLL and plugin folders |
+| macOS 12+ | [Compareel-1.1.0.dmg](https://github.com/turxlab/compareel/releases/latest) | Universal disk image for Apple Silicon and Intel |
+| Linux (x86_64) | [Compareel-1.1.0-x86_64.flatpak](https://github.com/turxlab/compareel/releases/latest) | Flatpak bundle (`io.github.turxlab.Compareel`); Flathub publishing is planned for later |
+| Source code | [Compareel-1.1.0-source.zip](https://github.com/turxlab/compareel/releases/latest) | Complete source for Compareel, bundled third-party libraries and build scripts |
 
 ### First start and verification
 
@@ -32,7 +32,7 @@ The binaries are not signed with a paid certificate or notarized by Apple:
 
 - **Windows**: SmartScreen asks for confirmation on first run. Click **More info** and then **Run anyway**.
 - **macOS**: Drag Compareel to **Applications**, then Control-click it and choose **Open** once. If macOS shows no **Open** button, click **Open Anyway** in **System Settings > Privacy & Security**.
-- **Linux**: The Flatpak app ID is `io.github.turxlab.Compareel` (uses the KDE 6.8 runtime from Flathub; publishing on Flathub itself is planned for later). Install with `flatpak install --user Compareel-1.0.0-x86_64.flatpak` and run with `flatpak run io.github.turxlab.Compareel`.
+- **Linux**: The Flatpak app ID is `io.github.turxlab.Compareel` (uses the KDE 6.8 runtime from Flathub; publishing on Flathub itself is planned for later). Install with `flatpak install --user Compareel-1.1.0-x86_64.flatpak` and run with `flatpak run io.github.turxlab.Compareel`.
 
 Every release is built on GitHub Actions from [.github/workflows/build.yml](.github/workflows/build.yml). Check downloads against `SHA256SUMS.txt` on the release page, or verify GitHub's build provenance attestation with `gh attestation verify <file> --repo turxlab/compareel`.
 
@@ -65,7 +65,7 @@ Every release is built on GitHub Actions from [.github/workflows/build.yml](.git
 
 - **Review decisions**: Mark pairs under **Review > Review decision** as **Reviewed** (Ctrl+1), **Keep both files** (Ctrl+2) or **Review later** (Ctrl+3), or hide false matches from future scans with **Review > Ignore this pair** (Ctrl+I). **Keep both files** and **Review later** protect both files from removal until cleared.
 - **Protected folders and files**: Mark source folders as **Protected** in **Scan sources…** so their files act as references and cannot be removed. Lock individual files with **Protect this file**.
-- **Cleanup plans**: Mark candidates one by one with **Review > Mark right file for cleanup** (Ctrl+M) and remove them with **Review > Move marked files to Recycle Bin…** (**Move marked files to Trash…** on macOS and Linux). To plan across all groups, open **Review > Move other copies to Recycle Bin…** (**Move other copies to Trash…** on macOS and Linux). Choose **Keep in each group** (reference file, highest resolution, longest duration, highest frame rate, largest or smallest file size, or newest or oldest modified date), set an optional **Preferred folder**, or save a CSV with **Export plan…**. Every group keeps at least one copy.
+- **Cleanup plans**: Mark candidates one by one with **Review > Mark right file for cleanup** (Ctrl+M) and remove them with **Review > Move marked files to Recycle Bin…** (**Move marked files to Trash…** on macOS and Linux). To plan across all groups, open **Review > Move other copies to Recycle Bin…** (**Move other copies to Trash…** on macOS and Linux). Choose **Keep in each group** (reference file, highest resolution, longest duration, highest frame rate, largest or smallest file size, newest or oldest modified date, oldest creation date, or oldest EXIF date taken for images), set an optional **Preferred folder**, or save a CSV with **Export plan…**. Every group keeps at least one copy.
 - **Recycle Bin and Trash only**: Removals never delete files permanently. Before moving anything, Compareel re-checks file identities on disk so an unplugged drive or changed file cannot remove the last remaining copy in a group.
 - **Verified copies, moves and undo**: Right-click a file (or use **File > Left file** and **File > Right file**) for **Copy to folder…**, **Move to folder…** and **Quarantine…**, or transfer all groups via **File > All result files**. Copies are verified with SHA-256 and never overwrite existing files. **File > Undo last copy or move…** (Ctrl+Z) works across restarts.
 - **History and sessions**: **Tools > Operation history** logs every removal, copy, move and quarantine with CSV export. Save `.cvsession` files with **File > Save review session…**, export group lists with **File > Export results…**, reopen the previous session with **File > Resume last review**, or inspect an interrupted cleanup with **File > Recover last cleanup review…**.
@@ -73,7 +73,7 @@ Every release is built on GitHub Actions from [.github/workflows/build.yml](.git
 ### Privacy
 
 - **Local processing**: Decoding, hashing, perceptual signatures and caching stay on your computer. Bundled FFmpeg libraries are built decode-only with network protocols, encoders and muxers disabled.
-- **Privacy mode**: **View > Privacy mode** (Ctrl+Shift+H, or the **Privacy** toolbar button) hides previews and thumbnails on screen and pauses automatic saving of the last review while enabled.
+- **Hide previews**: **View > Hide all previews** (Ctrl+Shift+H, or the **Hide** toolbar button) hides previews and thumbnails on screen and pauses automatic saving of the last review while enabled.
 - **Clear history**: **Help > Data and privacy** lists every local file Compareel stores. **File > Clear history…** removes selected local records: **Scan results**, **Reviews and decisions**, **File operation history**, **Scan cache** and **Recent folders**.
 - **Optional update check**: Outside Flatpak, Compareel asks once after first launch before making any network request. When enabled, it checks GitHub's latest release tag at most once a day, sends nothing about your files, and can be turned off anytime in **Tools > Settings…** (or run manually via **Help > Check for updates…**).
 
@@ -82,7 +82,7 @@ Every release is built on GitHub Actions from [.github/workflows/build.yml](.git
 Source files are never modified or converted. Unreadable, encrypted or damaged files are skipped without stopping the scan and listed with reasons in **Tools > Scan report**.
 
 - **Videos**: Decoded with Windows Media Foundation where available and bundled decode-only FFmpeg 8.1 elsewhere, with no codec packs needed. Supports MP4, MOV, MKV, WebM, AVI, WMV/ASF, MPEG-TS, FLV and other containers, and H.264, HEVC (including 10-bit), VP8, VP9, AV1, MPEG-2, MPEG-4, WMV and ProRes codecs, with rotation metadata and HDR tone mapping applied.
-- **Images**: Recognized by content signature rather than file extension alone. Supports JPEG, PNG, WebP, BMP, GIF, TIFF, TGA, HEIC/HEIF and AVIF (`libheif`), animated GIF/APNG/WebP/AVIF/HEIF, multi-page TIFF and HEIF collections, ICO/CUR/ICNS, SVG/SVGZ, PSD/PSB merged composites, JPEG 2000, JPEG-LS, EXR/HDR/PFM, Netpbm, DDS, PCX, QOI, camera RAW (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and others), JPEG XR (Windows only) and JPEG XL (**Exact copies** only).
+- **Images**: Recognized by content signature rather than file extension alone. Supports JPEG, PNG, WebP, BMP, GIF, TIFF, TGA, HEIC/HEIF and AVIF (`libheif`), animated GIF/APNG/WebP/AVIF/HEIF, multi-page TIFF and HEIF collections, ICO/CUR/ICNS, SVG/SVGZ, PSD/PSB merged composites, JPEG XL (`libjxl`), JPEG 2000, JPEG-LS, EXR/HDR/PFM, Netpbm, DDS, PCX, QOI, camera RAW (DNG, CR2, CR3, NEF, ARW, RAF, ORF, RW2, PEF and others) and JPEG XR (Windows only).
 
 See [packaging/SUPPORTED_FORMATS.md](packaging/SUPPORTED_FORMATS.md) for the full format table, comparison rules and size limits, and the [user guide](https://turxlab.github.io/compareel/) for usage details.
 
@@ -111,7 +111,7 @@ cmake --build build
 sudo cmake --install build   # optional: installs binary, desktop entry, metainfo and icons
 ```
 
-To build the release Flatpak bundle instead, run `tools/build-flatpak.sh 1.0.0`.
+To build the release Flatpak bundle instead, run `tools/build-flatpak.sh 1.1.0`.
 
 ### macOS
 
@@ -124,7 +124,7 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
 cmake --build build
 ```
 
-For the universal macOS 12+ `.dmg` (Apple Silicon and Intel) using official Qt 6.8.3 and decode-only FFmpeg 8.1 and `libheif` built from `third_party/`, install `brew install meson autoconf automake libtool nasm`, then run `tools/Setup-MacDeps.sh` and `./build-macos.sh --package 1.0.0`.
+For the universal macOS 12+ `.dmg` (Apple Silicon and Intel) using official Qt 6.8.3 and decode-only FFmpeg 8.1 and `libheif` built from `third_party/`, install `brew install meson autoconf automake libtool nasm`, then run `tools/Setup-MacDeps.sh` and `./build-macos.sh --package 1.1.0`.
 
 ### Windows
 
@@ -134,7 +134,7 @@ Install Visual Studio 2022 (C++ workload), CMake, Ninja and Docker, and place th
 .\tools\Build-FFmpegMinimal.ps1       # decode-only FFmpeg 8.1 -> .deps/ffmpeg-8.1-min
 .\tools\Setup-Heif.ps1                # downloads and builds libheif 1.23.7 (via Build-Heif.cmd)
 .\tools\build.cmd                     # builds into .build
-.\build.ps1 -Package -Version 1.0.0   # installer, portable zip and source zip in release/
+.\build.ps1 -Package -Version 1.1.0   # installer, portable zip and source zip in release/
 ```
 
 ### Tests

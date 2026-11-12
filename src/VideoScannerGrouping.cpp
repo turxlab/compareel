@@ -17,10 +17,10 @@ bool VideoScanner::FilesMatch(
     const ScanCriteria& criteria,
     double* outFrameSim)
 {
-    if (a.deleted || b.deleted) return false;
+    if (a.deleted || b.deleted || a.corrupted || b.corrupted) return false;
     if(criteria.crossFolderOnly && (a.comparisonRoot<0 || b.comparisonRoot<0 || a.comparisonRoot==b.comparisonRoot)) return false;
-    if(criteria.ignoredPairs.contains(ReviewPairKey(a.identity,b.identity))) return false;
-    if (a.identity.valid && b.identity.valid && a.identity.volume == b.identity.volume && a.identity.index == b.identity.index) return false;
+    if(criteria.ignoredPairs.contains(ReviewPairKey(a,b)) || criteria.ignoredPairs.contains(ReviewPairKey(a.identity,b.identity))) return false;
+    if (SamePhysicalFile(a, b)) return false;
     if (criteria.matchFileName) {
         if (FileStemLowerW(a.fileName) != FileStemLowerW(b.fileName)) return false;
     }
@@ -28,7 +28,6 @@ bool VideoScanner::FilesMatch(
         if (FileExtLowerW(a.fileName) != FileExtLowerW(b.fileName)) return false;
     }
     if (criteria.matchContent) return !a.contentHash.empty() && a.fileSize == b.fileSize && a.contentHash == b.contentHash;
-    if (a.corrupted || b.corrupted) return false;
 
     if (criteria.matchSize && a.fileSize != b.fileSize) return false;
 
@@ -40,11 +39,12 @@ bool VideoScanner::FilesMatch(
 
     if (criteria.matchResolution) {
         if (!a.metadataLoaded || !b.metadataLoaded) return false;
-        if (a.width == 0 || b.width == 0) return false;
+        if (a.width == 0 || a.height == 0 || b.width == 0 || b.height == 0) return false;
         if (a.width != b.width || a.height != b.height) return false;
     }
 
     if(criteria.images && criteria.matchFirstFrame) {
+        if (a.previewFailed || b.previewFailed || !a.frameLoaded || !b.frameLoaded) return false;
         bool accepted = false;
         double best = PerceptualHash::CompareImageFiles(a, b, criteria.matchTransforms, criteria.minFrameSimilarity, &accepted,!outFrameSim);
         if(outFrameSim) *outFrameSim=best;
@@ -57,7 +57,7 @@ bool VideoScanner::FilesMatch(
     if (outFrameSim) *outFrameSim = sim;
 
     if (criteria.matchVisualSamples) {
-        if (a.samples.size() != 5 || b.samples.size() != 5) return false;
+        if (a.previewFailed || b.previewFailed || a.samples.size() != 5 || b.samples.size() != 5) return false;
         double best=0; bool accepted=false;
         // A single orientation must explain the entire clip, not a different transform per frame.
         for(int orientation=-1;orientation<(criteria.matchTransforms?8:0);++orientation) {
@@ -72,14 +72,18 @@ bool VideoScanner::FilesMatch(
                 if(similarity>=criteria.minFrameSimilarity) ++matches;
                 if(similarity>=criteria.minFrameSimilarity-3.0) ++nearMatches;
             }
-            if(valid>=3) { best=std::max(best,total/valid); accepted|=(matches*5>=valid*4) || (criteria.matchTransforms && (total/valid)>=criteria.minFrameSimilarity && matches*5>=valid*3 && nearMatches==valid); }
+            if(valid>=3) {
+                best=std::max(best,total/valid);
+                accepted|=(matches*5>=valid*4) || (criteria.matchTransforms && (total/valid)>=criteria.minFrameSimilarity && matches*5>=valid*3 && nearMatches==valid);
+                if(accepted && !outFrameSim) return true;
+            }
         }
         if(outFrameSim) *outFrameSim=best;
         return accepted;
     }
 
     if (criteria.matchFirstFrame) {
-        if (!a.frameLoaded || !b.frameLoaded || !a.sigFirst.valid || !b.sigFirst.valid) return false;
+        if (a.previewFailed || b.previewFailed || !a.frameLoaded || !b.frameLoaded || !a.sigFirst.valid || !b.sigFirst.valid) return false;
         if (sim < criteria.minFrameSimilarity) return false;
     }
 
@@ -91,7 +95,17 @@ void VideoScanner::AnalyzeAndGroup(
     std::vector<VideoGroup>& outGroups, std::atomic<bool>& cancelFlag,
     ProgressCallback onProgress,FileProcessedCallback onFileProcessed,ScanMetrics* metrics,std::function<void(VideoFileInfo&)> readImage)
 {
-    if(metrics) *metrics={};
+    if(metrics) {
+        const size_t prevDiscovered=metrics->discoveredFiles;
+        const size_t prevOutside=metrics->outsideSizeLimits;
+        const size_t prevUnique=metrics->skippedUniqueSize;
+        const bool prevCompacted=metrics->compactedFiles;
+        *metrics={};
+        metrics->discoveredFiles=prevDiscovered;
+        metrics->outsideSizeLimits=prevOutside;
+        metrics->skippedUniqueSize=prevUnique;
+        metrics->compactedFiles=prevCompacted;
+    }
     auto phaseStart=std::chrono::steady_clock::now();
     for(auto& file:files) {
         file.comparisonRoot=-1; size_t longest=0;
@@ -101,15 +115,24 @@ void VideoScanner::AnalyzeAndGroup(
     outGroups.clear();
     std::vector<int> candidates;
     std::map<uint64_t, unsigned> sizes;
+    size_t outsideLimits = 0;
     for (int i = 0; i < static_cast<int>(files.size()); ++i) {
         if (files[i].deleted) continue;
-        if (files[i].fileSize < criteria.minFileSize || files[i].fileSize > criteria.maxFileSize) continue;
+        if (files[i].fileSize < criteria.minFileSize || files[i].fileSize > criteria.maxFileSize) { ++outsideLimits; continue; }
         candidates.push_back(i);
         ++sizes[files[i].fileSize];
     }
-    if (criteria.matchContent || criteria.matchSize)
+    size_t uniqueSkipped = 0;
+    if (criteria.matchContent || criteria.matchSize) {
+        const size_t before = candidates.size();
         std::erase_if(candidates, [&](int index) { return sizes[files[index].fileSize] < 2; });
-    if(metrics) metrics->inputCandidates=candidates.size();
+        uniqueSkipped = before - candidates.size();
+    }
+    if(metrics) {
+        metrics->outsideSizeLimits += outsideLimits;
+        metrics->skippedUniqueSize += uniqueSkipped;
+        metrics->inputCandidates = candidates.size();
+    }
     if (candidates.size() < 2 || cancelFlag.load()) return;
 
     std::map<uint64_t, StorageTier> volumeTiers;
@@ -228,7 +251,15 @@ void VideoScanner::AnalyzeAndGroup(
                         }
                     }
                 }
-                catch (...) { file.error = E_FAIL; file.corrupted = true; }
+                catch (...) {
+                    file.error = E_FAIL;
+                    if (file.identity.valid && FileOperations::ReadIdentity(file.fullPath) != file.identity) {
+                        file.contentHash.clear();
+                        file.corrupted = true;
+                    } else {
+                        file.previewFailed = true;
+                    }
+                }
                 releaseVolume(vol);
                 if(onFileProcessed) onFileProcessed(file);
                 size_t completed = done.fetch_add(1) + 1;
@@ -251,7 +282,7 @@ void VideoScanner::AnalyzeAndGroup(
                 file.contentHash.clear(); file.error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID); return;
             }
             file.identity = identity;
-            if (file.contentHash.empty()) file.contentHash = FileOperations::ContentHash(file.fullPath, cancelFlag, file.error);
+            if (file.contentHash.empty()) file.contentHash = FileOperations::ContentHash(file.fullPath, cancelFlag, file.error, identity);
             if (FileOperations::ReadIdentity(file.fullPath) != identity) {
                 file.contentHash.clear(); file.error = HRESULT_FROM_WIN32(ERROR_FILE_INVALID);
             }
@@ -263,16 +294,16 @@ void VideoScanner::AnalyzeAndGroup(
             criteria.sortOrder == SortOrder::DurationAsc || criteria.sortOrder == SortOrder::DurationDesc ||
             criteria.sortOrder == SortOrder::ResolutionAsc || criteria.sortOrder == SortOrder::ResolutionDesc;
         auto image=[&](VideoFileInfo& file) {
-            if(file.frameLoaded || file.corrupted) return;
+            if((file.frameLoaded && file.metadataLoaded) || file.corrupted || file.previewFailed) return;
             if(readImage) readImage(file);
-            else { file.error=E_NOTIMPL; file.corrupted=true; }
+            else { file.error=E_NOTIMPL; file.previewFailed=true; }
         };
         if (metadata) parallel([&](VideoFileInfo& file) { if(criteria.images) image(file); else ExtractMetadataOnly(file, &cancelFlag); }, 2, L"Reading media information");
         if(criteria.matchDuration && !cancelFlag.load()) {
             auto before=candidates.size();
             std::erase_if(candidates,[&](int index) {
                 const auto& file=files[index];
-                return file.corrupted || !file.metadataLoaded || file.duration100ns<=0;
+                return file.corrupted || file.previewFailed || !file.metadataLoaded || file.duration100ns<=0;
             });
             std::sort(candidates.begin(),candidates.end(),[&](int a,int b) { return files[a].duration100ns<files[b].duration100ns; });
             std::vector<int> neighbors;
@@ -291,7 +322,16 @@ void VideoScanner::AnalyzeAndGroup(
         if (criteria.matchFirstFrame || criteria.matchVisualSamples)
             parallel([&](VideoFileInfo& file) { if(criteria.images) image(file); else ExtractMetadataAndFrame(file, criteria.matchVisualSamples, &cancelFlag); },
                      3, L"Sampling video content");
-        if (metadata || criteria.matchFirstFrame) std::erase_if(candidates, [&](int index) { return files[index].corrupted; });
+        if (metadata || criteria.matchFirstFrame || criteria.matchVisualSamples) {
+            std::erase_if(candidates, [&](int index) {
+                const auto& f = files[index];
+                if (f.corrupted) return true;
+                if ((criteria.matchFirstFrame || criteria.matchVisualSamples) && (!f.frameLoaded || f.previewFailed)) return true;
+                if (criteria.matchDuration && (!f.metadataLoaded || f.duration100ns <= 0)) return true;
+                if (criteria.matchResolution && (!f.metadataLoaded || f.width == 0 || f.height == 0)) return true;
+                return false;
+            });
+        }
         if(metrics) metrics->sampleMs=elapsedMs();
     }
     if (candidates.size() < 2 || cancelFlag.load()) return;
@@ -306,9 +346,9 @@ void VideoScanner::AnalyzeAndGroup(
         candidates.assign(members.begin(), members.end());
         if (!candidates.empty()) parallel([&](VideoFileInfo& file) {
             if (criteria.images) {
-                if (readImage && !file.frameLoaded && !file.corrupted) readImage(file);
+                if (readImage && (!file.frameLoaded || !file.metadataLoaded) && !file.corrupted && !file.previewFailed) readImage(file);
             } else {
-                ExtractMetadataAndFrame(file, false, &cancelFlag);
+                if (!file.corrupted && !file.previewFailed) ExtractMetadataAndFrame(file, false, &cancelFlag);
             }
         }, 3, L"Preparing previews");
     }
@@ -317,56 +357,96 @@ void VideoScanner::AnalyzeAndGroup(
 
 void VideoScanner::GroupKnownFiles(const std::vector<VideoFileInfo>& files,std::vector<int> candidates,
     const ScanCriteria& criteria,std::vector<VideoGroup>& outGroups,std::atomic<bool>& cancelFlag,ProgressCallback onProgress) {
-    outGroups.clear(); if(candidates.size()<2) return;
+    outGroups.clear();
+    std::erase_if(candidates,[&](int idx) {
+        if(idx<0 || static_cast<size_t>(idx)>=files.size()) return true;
+        const auto& f=files[idx];
+        if(f.deleted) return true;
+        if(criteria.matchContent) return f.contentHash.empty();
+        if(f.corrupted) return true;
+        if(criteria.matchDuration && (!f.metadataLoaded || f.duration100ns<=0)) return true;
+        if(criteria.matchResolution && (!f.metadataLoaded || f.width==0 || f.height==0)) return true;
+        if(criteria.matchVisualSamples && (f.previewFailed || f.samples.size()!=5)) return true;
+        if(criteria.matchFirstFrame && !criteria.matchVisualSamples && (f.previewFailed || !f.frameLoaded || !f.sigFirst.valid)) return true;
+        return false;
+    });
+    if(candidates.size()<2) return;
+    const SortOrder preSortOrder =
+        (criteria.sortOrder == SortOrder::SimilarityDesc || criteria.sortOrder == SortOrder::SimilarityAsc)
+        ? SortOrder::SizeDesc
+        : criteria.sortOrder;
     VideoGroup ranked;
     ranked.fileIndices = candidates;
     std::vector<VideoGroup> ranking{ranked};
-    SortGroups(files, ranking, criteria.sortOrder,criteria.matchTransforms);
+    SortGroups(files, ranking, preSortOrder, criteria.matchTransforms);
     candidates = std::move(ranking[0].fileIndices);
     std::unique_ptr<ImageCandidates> imageCandidates;
     const auto temporal=[&](size_t pos) { const auto kind=files[candidates[pos]].imageKind; return kind==ImageEvidenceKind::AnimatedImage || kind==ImageEvidenceKind::MultiPageDocument; };
     std::vector<size_t> temporalPositions;
     for(size_t i=0;i<candidates.size();++i) if(temporal(i)) temporalPositions.push_back(i);
-    if(criteria.images && criteria.matchFirstFrame && !criteria.matchContent && criteria.minFrameSimilarity>=85 && candidates.size()-temporalPositions.size()>=64) {
-        const uint64_t estimate=4*12*65536+candidates.size()*(criteria.matchTransforms?18:1)*80ULL;
+    if(criteria.images && criteria.matchFirstFrame && !criteria.matchContent && candidates.size()-temporalPositions.size()>=64) {
+        const size_t approxPoints=candidates.size()*(criteria.matchTransforms?18:1);
+        const uint64_t bucketBytes=ImageCandidates::usesBucketIndex(criteria.minFrameSimilarity,approxPoints)
+            ?(4ULL*12*65536+approxPoints*48ULL):0ULL;
+        const uint64_t estimate=bucketBytes+approxPoints*32ULL;
         if(Platform::AvailablePhysicalMemoryBytes(0)>estimate*3) {
-            try { imageCandidates=std::make_unique<ImageCandidates>(files,candidates,criteria.matchTransforms,cancelFlag); }
+            try { imageCandidates=std::make_unique<ImageCandidates>(files,candidates,criteria.matchTransforms,cancelFlag,criteria.minFrameSimilarity); }
             catch(const std::bad_alloc&) { imageCandidates.reset(); }
         }
     }
     // Related-image components retain direct matches; cleanup checks each pair.
-    if(criteria.images && criteria.matchFirstFrame && !criteria.matchContent) {
+    if(!criteria.crossFolderOnly && criteria.images && criteria.matchFirstFrame && !criteria.matchContent) {
         std::vector<size_t> parent(candidates.size());
         for(size_t i=0;i<parent.size();++i) parent[i]=i;
         auto root=[&](size_t i) { while(parent[i]!=i) { parent[i]=parent[parent[i]]; i=parent[i]; } return i; };
         std::atomic<size_t> next{0}; std::atomic<bool> abort{false};
         std::mutex groupingMutex; size_t completed=0;
         auto work=[&] {
-          try { for(;;) {
-            const size_t i=next.fetch_add(1);
-            if(i>=candidates.size() || cancelFlag.load() || abort.load()) return;
+          try {
+            ImageCandidates::Scratch scratch;
             std::vector<size_t> window;
-            if(imageCandidates && !temporal(i)) window=imageCandidates->query(files[candidates[i]],criteria.minFrameSimilarity,true);
-            std::lock_guard lock(groupingMutex);
-            auto connect=[&](size_t j) {
-                if(j==i || cancelFlag.load()) return;
-                const auto a=root(i),b=root(j);
-                if(a!=b && FilesMatch(files[candidates[i]],files[candidates[j]],criteria)) parent[b]=a;
-            };
-            // Animations/pages keep full temporal evidence without disabling the
-            // static-image index for the rest of a mixed archive.
-            if(temporal(i)) {
-                for(auto j:temporalPositions) if(j>i && files[candidates[i]].imageKind==files[candidates[j]].imageKind) connect(j);
-            } else if(imageCandidates) {
-                // Query the canonical orientation at BOTH endpoints. The reverse
-                // query covers a rotated query frame; never discard j<i here.
-                for(auto j:window) connect(j);
-            } else for(size_t j=i+1;j<candidates.size();++j) if(!temporal(j)) connect(j);
-            ++completed;
-            if(onProgress && completed%100==0) { ScanProgress p; p.stage=4; p.current=int(completed); p.total=int(candidates.size()); p.statusText=L"Grouping related images"; onProgress(p); }
-          } } catch(...) { abort=true; throw; }
+            std::vector<size_t> localMatches;
+            for(;;) {
+              const size_t i=next.fetch_add(1,std::memory_order_relaxed);
+              if(i>=candidates.size() || cancelFlag.load(std::memory_order_relaxed) || abort.load(std::memory_order_relaxed)) return;
+              localMatches.clear();
+              // Animations/pages keep full temporal evidence without disabling the
+              // static-image index for the rest of a mixed archive.
+              if(temporal(i)) {
+                  for(auto j:temporalPositions) {
+                      if(cancelFlag.load(std::memory_order_relaxed)) return;
+                      if(j>i && files[candidates[i]].imageKind==files[candidates[j]].imageKind && FilesMatch(files[candidates[i]],files[candidates[j]],criteria))
+                          localMatches.push_back(j);
+                  }
+              } else if(imageCandidates) {
+                  // Query the canonical orientation at BOTH endpoints. The reverse
+                  // query covers a rotated query frame; never discard j<i here.
+                  imageCandidates->query(files[candidates[i]],criteria.minFrameSimilarity,true,scratch,window);
+                  for(auto j:window) {
+                      if(cancelFlag.load(std::memory_order_relaxed)) return;
+                      if(j!=i && FilesMatch(files[candidates[i]],files[candidates[j]],criteria)) localMatches.push_back(j);
+                  }
+              } else {
+                  for(size_t j=i+1;j<candidates.size();++j) {
+                      if(cancelFlag.load(std::memory_order_relaxed)) return;
+                      if(!temporal(j) && FilesMatch(files[candidates[i]],files[candidates[j]],criteria)) localMatches.push_back(j);
+                  }
+              }
+              size_t doneNow=0;
+              {
+                  std::lock_guard lock(groupingMutex);
+                  for(size_t j:localMatches) {
+                      const auto a=root(i),b=root(j);
+                      if(a!=b) { if(a<b) parent[b]=a; else parent[a]=b; }
+                  }
+                  doneNow=++completed;
+              }
+              if(onProgress && doneNow%100==0) { ScanProgress p; p.stage=4; p.current=int(doneNow); p.total=int(candidates.size()); p.statusText=L"Grouping related images"; onProgress(p); }
+            }
+          } catch(...) { abort=true; throw; }
         };
-        const unsigned workers=imageCandidates && candidates.size()>=4096?std::max(1u,std::min({criteria.workerCount,4u,std::max(1u,std::thread::hardware_concurrency())})):1u;
+        const unsigned hw=std::max(1u,std::thread::hardware_concurrency());
+        const unsigned workers=candidates.size()>=128?std::clamp(criteria.workerCount,1u,std::min(16u,hw)):1u;
         std::vector<std::future<void>> tasks;
         for(unsigned i=1;i<workers;++i) tasks.push_back(std::async(std::launch::async,work));
         work(); for(auto& task:tasks) task.get();
@@ -385,11 +465,13 @@ void VideoScanner::GroupKnownFiles(const std::vector<VideoFileInfo>& files,std::
         std::map<std::wstring, std::vector<size_t>> groupsByKey;
         for (int index : candidates) {
             const auto& file = files[index];
-            std::wstring key = criteria.matchContent ? std::wstring(file.contentHash.begin(), file.contentHash.end()) :
-                sizeOnly ? std::to_wstring(file.fileSize) : std::to_wstring(file.width) + L"x" + std::to_wstring(file.height);
+            std::wstring key = criteria.matchContent
+                ? (std::to_wstring(file.fileSize) + L":" + std::wstring(file.contentHash.begin(), file.contentHash.end()))
+                : sizeOnly ? std::to_wstring(file.fileSize) : std::to_wstring(file.width) + L"x" + std::to_wstring(file.height);
             auto& possible=groupsByKey[key];
             auto compatible=std::find_if(possible.begin(),possible.end(),[&](size_t group) {
-                return !criteria.ignoredPairs.contains(ReviewPairKey(files[outGroups[group].fileIndices[0]].identity,file.identity));
+                const auto& ref = files[outGroups[group].fileIndices[0]];
+                return FilesMatch(ref, file, criteria);
             });
             if(compatible==possible.end()) { possible.push_back(outGroups.size()); outGroups.emplace_back(); outGroups.back().fileIndices.push_back(index); }
             else outGroups[*compatible].fileIndices.push_back(index);
@@ -406,12 +488,15 @@ void VideoScanner::GroupKnownFiles(const std::vector<VideoFileInfo>& files,std::
             }
             std::sort(byDuration.begin(), byDuration.end());
         }
+        ImageCandidates::Scratch scratch;
         std::vector<size_t> window;
         for(size_t i=0;i<candidates.size() && !cancelFlag.load();++i) {
             if(covered[i]) continue;
             size_t anchor=i;
-            if(imageCandidates) {
-                window=imageCandidates->query(files[candidates[i]],criteria.minFrameSimilarity);
+            if(criteria.images && criteria.matchFirstFrame && temporal(i)) {
+                for(size_t j:temporalPositions) if(j<i && files[candidates[i]].imageKind==files[candidates[j]].imageKind && FilesMatch(files[candidates[i]],files[candidates[j]],criteria)) { anchor=j; break; }
+            } else if(imageCandidates && !temporal(i)) {
+                imageCandidates->query(files[candidates[i]],criteria.minFrameSimilarity,false,scratch,window);
                 for(size_t j:window) if(j<i && FilesMatch(files[candidates[i]],files[candidates[j]],criteria)) { anchor=j; break; }
             } else if (!byDuration.empty()) {
                 const int64_t dur = files[candidates[i]].duration100ns;
@@ -426,8 +511,13 @@ void VideoScanner::GroupKnownFiles(const std::vector<VideoFileInfo>& files,std::
                 for(size_t j=0;j<i;++j) if(FilesMatch(files[candidates[i]],files[candidates[j]],criteria)) { anchor=j; break; }
             }
             VideoGroup group; group.fileIndices.push_back(candidates[anchor]);
-            if(imageCandidates) {
-                window=imageCandidates->query(files[candidates[anchor]],criteria.minFrameSimilarity);
+            if(criteria.images && criteria.matchFirstFrame && temporal(anchor)) {
+                for(size_t j:temporalPositions) {
+                    if(cancelFlag.load()) return;
+                    if(j>anchor && files[candidates[anchor]].imageKind==files[candidates[j]].imageKind && FilesMatch(files[candidates[anchor]],files[candidates[j]],criteria)) { group.fileIndices.push_back(candidates[j]); covered[j]=true; }
+                }
+            } else if(imageCandidates && !temporal(anchor)) {
+                imageCandidates->query(files[candidates[anchor]],criteria.minFrameSimilarity,false,scratch,window);
                 for(size_t j:window) {
                     if(cancelFlag.load()) return;
                     if(j>anchor && FilesMatch(files[candidates[anchor]],files[candidates[j]],criteria)) { group.fileIndices.push_back(candidates[j]); covered[j]=true; }
@@ -462,13 +552,14 @@ void VideoScanner::GroupKnownFiles(const std::vector<VideoFileInfo>& files,std::
             }
             std::sort(byDuration.begin(), byDuration.end());
         }
+        ImageCandidates::Scratch scratch;
         std::vector<size_t> window;
         for (size_t i = 0; i < candidates.size() && !cancelFlag.load(); ++i) {
             if (assigned[i]) continue;
             VideoGroup group;
             group.fileIndices.push_back(candidates[i]);
-            if(imageCandidates) {
-                window=imageCandidates->query(files[candidates[i]],criteria.minFrameSimilarity);
+            if(imageCandidates && !temporal(i)) {
+                imageCandidates->query(files[candidates[i]],criteria.minFrameSimilarity,false,scratch,window);
                 for(size_t j:window) {
                     if(cancelFlag.load()) return;
                     if(j>i && !assigned[j] && FilesMatch(files[candidates[i]],files[candidates[j]],criteria)) { group.fileIndices.push_back(candidates[j]); assigned[j]=true; }
@@ -516,4 +607,7 @@ void VideoScanner::GroupKnownFiles(const std::vector<VideoFileInfo>& files,std::
         }
     }
     if(cancelFlag.load()) outGroups.clear();
+    else if(criteria.sortOrder == SortOrder::SimilarityDesc || criteria.sortOrder == SortOrder::SimilarityAsc) {
+        SortGroups(files, outGroups, criteria.sortOrder, criteria.matchTransforms);
+    }
 }

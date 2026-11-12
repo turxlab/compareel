@@ -73,11 +73,13 @@ struct DirectoryEntry {
     std::wstring fileName;
     uint64_t fileSize = 0;
     uint64_t lastWriteTime = 0;
+    uint64_t createdTime = 0;
     bool isDirectory = false;
     bool isReparsePoint = false;
 };
 
-bool StatRegularFile(const std::wstring& path, uint64_t& outSize, uint64_t& outLastWriteTime);
+bool StatRegularFile(const std::wstring& path, uint64_t& outSize, uint64_t& outLastWriteTime, uint64_t* outCreatedTime = nullptr);
+uint64_t ReadFileCreationTime(const std::wstring& path);
 bool EnumerateDirectory(const std::wstring& directory,
                         std::atomic<bool>& cancelFlag,
                         const std::function<void(DirectoryEntry&&)>& onEntry,
@@ -115,7 +117,40 @@ bool InstallOwnedShortcut(const std::wstring& path,
 
 std::wstring FormatErrorMessage(HRESULT error);
 FileIdentity ReadFileIdentity(const std::wstring& path, DWORD* error = nullptr);
-std::string HashFileSha256(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error);
+std::string HashFileSha256(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error, const FileIdentity& expected = {});
 HRESULT RemoveFile(HWND owner, const std::wstring& path, bool recycle, const FileIdentity& expected = {});
 
 } // namespace Platform
+
+inline bool SamePhysicalFile(const VideoFileInfo& a, const VideoFileInfo& b) {
+    if (!a.identity.valid || !b.identity.valid) return false;
+    if (HasUniqueFileIndex(a.identity) && HasUniqueFileIndex(b.identity)) {
+        return a.identity.volume == b.identity.volume && a.identity.index == b.identity.index;
+    }
+    if (HasUniqueFileIndex(a.identity) != HasUniqueFileIndex(b.identity)) {
+        return false;
+    }
+    return !a.fullPath.empty() && !b.fullPath.empty() &&
+           Platform::NormalizePathKey(a.fullPath) == Platform::NormalizePathKey(b.fullPath);
+}
+
+inline std::wstring PhysicalFileKey(const VideoFileInfo& file) {
+    if (HasUniqueFileIndex(file.identity)) {
+        return std::to_wstring(file.identity.volume) + L":" + std::to_wstring(file.identity.index);
+    }
+    return L"path:" + Platform::NormalizePathKey(file.fullPath);
+}
+
+inline std::string FileReviewId(const VideoFileInfo& file) {
+    if (!file.identity.valid) return {};
+    if (HasUniqueFileIndex(file.identity)) return FileReviewId(file.identity);
+    return FileReviewId(file.identity, Platform::NormalizePathKey(file.fullPath));
+}
+
+inline std::string ReviewPairKey(const VideoFileInfo& a, const VideoFileInfo& b) {
+    if (!a.identity.valid || !b.identity.valid) return {};
+    auto left = FileReviewId(a), right = FileReviewId(b);
+    if (left.empty() || right.empty()) return {};
+    if (right < left) std::swap(left, right);
+    return left + "/" + right;
+}

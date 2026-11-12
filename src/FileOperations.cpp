@@ -12,8 +12,8 @@ FileIdentity ReadIdentity(const std::wstring& path, DWORD* error) {
     return Platform::ReadFileIdentity(path, error);
 }
 
-std::string ContentHash(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error) {
-    return Platform::HashFileSha256(path, cancel, error);
+std::string ContentHash(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error, const FileIdentity& expected) {
+    return Platform::HashFileSha256(path, cancel, error, expected);
 }
 
 TransferResult Transfer(const std::wstring& source, const std::wstring& destination, TransferKind kind,

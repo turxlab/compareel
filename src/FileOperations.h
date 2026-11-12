@@ -9,7 +9,7 @@ struct Result {
 };
 
 FileIdentity ReadIdentity(const std::wstring& path, DWORD* error = nullptr);
-std::string ContentHash(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error);
+std::string ContentHash(const std::wstring& path, std::atomic<bool>& cancel, HRESULT& error, const FileIdentity& expected = {});
 Result Remove(HWND owner, const std::wstring& path, bool recycle,
               const FileIdentity& expected = {});
 enum class TransferKind { Copy, Move };

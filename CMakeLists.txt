@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 # Set before project() so every target, including the bundled libraries' consumers, targets the same macOS.
 set(CMAKE_OSX_DEPLOYMENT_TARGET "12.0" CACHE STRING "Minimum macOS version")
-project(Compareel VERSION 1.0.0 LANGUAGES CXX)
+project(Compareel VERSION 1.1.0 LANGUAGES CXX)
 if(WIN32)
     enable_language(RC)
 endif()

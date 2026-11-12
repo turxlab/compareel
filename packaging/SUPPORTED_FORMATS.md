@@ -36,7 +36,7 @@ Files are recognized by their content signature, not only by extension.
 | Other | dds pcx qoi sgi rgb rgba bw ras sun dpx iff ilbm lbm | |
 | Camera RAW | dng cr2 cr3 nef nrw arw srf sr2 raf orf rw2 pef srw erf kdc dcr 3fr mef mos iiq raw | embedded preview or uncompressed data; otherwise developed by the system RAW codec on Windows and macOS |
 | JPEG XR | jxr wdp hdp | Windows only (WIC); not listed on macOS and Linux, which have no decoder |
-| JPEG XL | jxl | exact copies only |
+| JPEG XL | jxl | libjxl |
 
 - EXIF orientation is applied, ICC profiles are converted to sRGB and transparency is composited on white.
 - A static image never matches an animation, and two animations must match over their whole duration.

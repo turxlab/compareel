@@ -625,6 +625,7 @@ double CompareImageSignaturesOneWay(const FrameSignature& a, const FrameSignatur
         const auto bits=std::popcount(a.dHashH^b.dHashH)+std::popcount(a.dHashV^b.dHashV)+std::popcount(a.aHash^b.aHash);
         coarse=std::max(coarse,65.0*(1.0-bits/192.0)+35.0*std::max(0.0,1.0-exposureError/85.0));
     }
+    if(scoreFloor>0.0 && coarse+1e-5<scoreFloor) return coarse;
     uint64_t active64 = a.fgCellMask64 | b.fgCellMask64;
     if (std::popcount(active64) < 8) active64 = ~0ULL;
     const double nActive = static_cast<double>(std::popcount(active64));
@@ -784,8 +785,12 @@ double CompareImageFiles(
                 best = std::max(best, CompareImageSignaturesWithCrop(a.sigFirst.normalized[0], candidate,std::max(scoreFloor,best)));
             }
         }
-        for(const auto& candidate:a.sigFirst.normalized) if(!b.sigFirst.normalized[0].lowVariance && candidate.valid && !candidate.lowVariance)
-            best=std::max(best,CompareImageSignaturesWithCrop(candidate,b.sigFirst.normalized[0],std::max(scoreFloor,best)));
+        for (size_t k = 1; k < a.sigFirst.normalized.size(); ++k) {
+            const auto& candidate = a.sigFirst.normalized[k];
+            if (!b.sigFirst.normalized[0].lowVariance && candidate.valid && !candidate.lowVariance) {
+                best = std::max(best, CompareImageSignaturesWithCrop(candidate, b.sigFirst.normalized[0], std::max(scoreFloor, best)));
+            }
+        }
     }
     if (outAccepted) *outAccepted = (best >= minFrameSimilarity);
     return best;
